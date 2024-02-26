@@ -247,8 +247,10 @@ class TemplateDeductionInfo;
 } // namespace sema
 
 namespace threadSafety {
-class BeforeSet;
-void threadSafetyCleanup(BeforeSet *Cache);
+  class AnalysisCache;
+  void threadSafetyCleanup(AnalysisCache* Cache);
+  void threadSafetyRegisterCapabilityHolder(AnalysisCache** Cache, DetachedCapabilityHolderAttr* Attr);
+  void threadSafetyRegisterExecuteWithCapability(AnalysisCache** Cache, DetachedExecuteWithCapabilityAttr* Attr);  
 } // namespace threadSafety
 
 // FIXME: No way to easily map from TemplateTypeParmTypes to
@@ -1036,7 +1038,7 @@ public:
 
   /// Worker object for performing CFG-based warnings.
   sema::AnalysisBasedWarnings AnalysisWarnings;
-  threadSafety::BeforeSet *ThreadSafetyDeclCache;
+  threadSafety::AnalysisCache *ThreadSafetyDeclCache;
 
   /// Callback to the parser to parse templated functions when needed.
   typedef void LateTemplateParserCB(void *P, LateParsedTemplate &LPT);
