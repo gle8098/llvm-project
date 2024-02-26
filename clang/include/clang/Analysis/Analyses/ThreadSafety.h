@@ -18,18 +18,22 @@
 #ifndef LLVM_CLANG_ANALYSIS_ANALYSES_THREADSAFETY_H
 #define LLVM_CLANG_ANALYSIS_ANALYSES_THREADSAFETY_H
 
+#include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceLocation.h"
-#include "llvm/ADT/StringRef.h"
 
 namespace clang {
 
 class AnalysisDeclContext;
 class FunctionDecl;
 class NamedDecl;
+class CXXMethodDecl;
+class Stmt;
+class DetachedCapabilityHolderAttr;
+class DetachedExecuteWithCapabilityAttr;
 
 namespace threadSafety {
 
-class BeforeSet;
+class AnalysisCache;
 
 /// This enum distinguishes between different kinds of operations that may
 /// need to be protected by locks. We use this enum in error handling.
@@ -95,6 +99,29 @@ enum LockErrorKind {
   LEK_NotLockedAtEndOfFunction
 };
 
+// todo: description
+enum ValueLosesAnnotationKind {
+  VLAK_Unspecified,
+  VLAK_ByReturning,
+  VLAK_ByPassingAsArgument,
+  VLAK_ByAssigningToField,
+};
+
+// todo: description
+struct DynamicRequiresAttrInfo {
+  /// Name of lock
+  std::string CapabilityName;
+
+  /// Begin location of the subject
+  SourceLocation LambdaLoc;
+
+  /// First found usage of CapExpr capability inside lambda
+  SourceRange CapUsageLoc;
+
+  DynamicRequiresAttrInfo(std::string CapabilityName, SourceLocation LambdaLoc,
+                          SourceRange CapUsageLoc);
+};
+
 /// Handler class for thread safety warnings.
 class ThreadSafetyHandler {
 public:
@@ -102,6 +129,9 @@ public:
 
   ThreadSafetyHandler() = default;
   virtual ~ThreadSafetyHandler();
+
+  // fixme: remove method
+  virtual DiagnosticsEngine *getDiagnosticsEngine() { return nullptr; };
 
   /// Warn about lock expressions which fail to resolve to lockable objects.
   /// \param Loc -- the SourceLocation of the unresolved expression.
@@ -190,10 +220,12 @@ public:
   /// in the error message.
   /// \param LK -- The kind of access (i.e. read or write) that occurred
   /// \param Loc -- The location of the protected operation.
-  virtual void handleMutexNotHeld(StringRef Kind, const NamedDecl *D,
-                                  ProtectedOperationKind POK, Name LockName,
-                                  LockKind LK, SourceLocation Loc,
-                                  Name *PossibleMatch = nullptr) {}
+  virtual void handleMutexNotHeld(
+      StringRef Kind, const NamedDecl *D, ProtectedOperationKind POK,
+      Name LockName, LockKind LK, SourceLocation Loc,
+      Name *PossibleMatch = nullptr,
+      std::optional<SourceRange> TrackingOriginLoc = std::nullopt,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr = nullptr) {}
 
   /// Warn when acquiring a lock that the negative capability is not held.
   /// \param Kind -- the capability's name parameter (role, mutex, etc).
@@ -230,6 +262,33 @@ public:
   /// Warn that there is a cycle in acquired_before/after dependencies.
   virtual void handleBeforeAfterCycle(Name L1Name, SourceLocation Loc) {}
 
+  // todo: descriptions
+
+  virtual void handleOverridenFuncRequiresLock(const FunctionDecl *D,
+                                               Name LockName,
+                                               SourceLocation Loc) {}
+
+  virtual void handleExecWithCapabilityUnsatisfied(
+      SourceLocation ArgLoc, const CXXMethodDecl *ExecMethodDecl,
+      Name UnsatisfiedLockName,
+      const llvm::SmallVector<std::string> &AcquiredLockNames,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
+
+  virtual void handleFunctionalObjectLosesRequiresAttr(
+      StringRef Kind, Name LockName, ValueLosesAnnotationKind VLAK,
+      SourceRange Loc, SourceRange TrackingOriginLoc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
+
+  virtual void handleVerboseDynamicRequiresAttribute(const CXXMethodDecl *M,
+                                                     Name LockName) {}
+
+  virtual void handleTrackingValuesModelFailure(const Stmt *S, Name Description,
+                                                SourceLocation Loc) {}
+
+  virtual void handleAssumedCalledInAcquiredThread(
+      Name LockName, SourceLocation Loc, bool insertedDynamicAttr,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
+
   /// Called by the analysis when starting analysis of a function.
   /// Used to issue suggestions for changes to annotations.
   virtual void enterFunction(const FunctionDecl *FD) {}
@@ -240,8 +299,12 @@ public:
   bool issueBetaWarnings() { return IssueBetaWarnings; }
   void setIssueBetaWarnings(bool b) { IssueBetaWarnings = b; }
 
+  bool issueSTEWarnings() { return IssueSTEWarnings; }
+  void setIssueSTEWarnings(bool b) { IssueSTEWarnings = b; }
+
 private:
   bool IssueBetaWarnings = false;
+  bool IssueSTEWarnings = false;
 };
 
 /// Check a function's CFG for thread-safety violations.
@@ -251,9 +314,15 @@ private:
 /// Each block in the CFG is traversed exactly once.
 void runThreadSafetyAnalysis(AnalysisDeclContext &AC,
                              ThreadSafetyHandler &Handler,
-                             BeforeSet **Bset);
+                             AnalysisCache **Bset);
 
-void threadSafetyCleanup(BeforeSet *Cache);
+void threadSafetyCleanup(AnalysisCache *Cache);
+
+void threadSafetyRegisterCapabilityHolder(AnalysisCache **Cache,
+                                          DetachedCapabilityHolderAttr *Attr);
+
+void threadSafetyRegisterExecuteWithCapability(
+    AnalysisCache **Cache, DetachedExecuteWithCapabilityAttr *Attr);
 
 /// Helper function that returns a LockKind required for the given level
 /// of access.

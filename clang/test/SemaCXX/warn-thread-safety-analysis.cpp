@@ -3967,7 +3967,7 @@ namespace TemplateLockReturned {
 template<class T>
 class BaseT {
 public:
-  virtual void baseMethod() = 0;
+  virtual void baseMethod() EXCLUSIVE_LOCKS_REQUIRED(get_mutex()) = 0;
   Mutex* get_mutex() LOCK_RETURNED(mutex_) { return &mutex_; }
 
   Mutex mutex_;

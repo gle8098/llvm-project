@@ -33,6 +33,7 @@
 #include "clang/Analysis/AnalysisDeclContext.h"
 #include "clang/Analysis/CFG.h"
 #include "clang/Basic/Builtins.h"
+#include "clang/Basic/DiagnosticSema.h"
 #include "clang/Basic/LLVM.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/SourceLocation.h"
@@ -51,12 +52,17 @@
 #include <cassert>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#ifndef NDEBUG
+#define PRINT_DEBUG_LOGS
+#endif
 
 using namespace clang;
 using namespace threadSafety;
@@ -307,6 +313,43 @@ public:
 private:
   BeforeMap BMap;
   CycleMap CycMap;
+};
+
+DynamicRequiresAttrInfo::DynamicRequiresAttrInfo(std::string CapabilityName,
+                                                 SourceLocation LambdaLoc,
+                                                 SourceRange CapUsageLoc)
+    : CapabilityName(std::move(CapabilityName)), LambdaLoc(LambdaLoc),
+      CapUsageLoc(CapUsageLoc) {}
+
+/// For 'thread' capabilities, these mustn't be specified in lambda declaration.
+/// For lambdas, we dynamically determine thread capability list.
+/// BuildLockset will not see such dynamic requirements, however they are fully
+/// replaced with LocalVarFollower analysis.
+struct DynamicRequiresCapabilityAttr {
+  Expr *CapExpr;
+  const CXXMethodDecl *Decl;
+  AccessKind AK;
+  DynamicRequiresAttrInfo Info;
+
+  DynamicRequiresCapabilityAttr(Expr *CapExpr, const CXXMethodDecl *Decl,
+                                AccessKind AK, SourceLocation LambdaLoc,
+                                SourceRange CapUsageLoc,
+                                std::string CapabilityName)
+      : CapExpr(CapExpr), Decl(Decl), AK(AK),
+        Info(std::move(CapabilityName), LambdaLoc, CapUsageLoc) {}
+};
+
+using DynamicRequiresAttributes =
+    llvm::DenseMap<const CXXMethodDecl *,
+                   std::unique_ptr<DynamicRequiresCapabilityAttr>>;
+
+class AnalysisCache {
+public:
+  BeforeSet BSet;
+  DynamicRequiresAttributes ReqAttrs;
+  llvm::SmallVector<StringRef> CapabilityHolders;
+  llvm::SmallVector<DetachedExecuteWithCapabilityAttr *>
+      ExecuteWithCapabilityAttrs;
 };
 
 } // namespace threadSafety
@@ -998,9 +1041,49 @@ private:
   }
 };
 
+struct AnyRequiresAttr
+    : public llvm::PointerUnion<RequiresCapabilityAttr *,
+                                DynamicRequiresCapabilityAttr *> {
+  using llvm::PointerUnion<RequiresCapabilityAttr *,
+                           DynamicRequiresCapabilityAttr *>::PointerUnion;
+
+  std::pair<llvm::iterator_range<Expr **>, DynamicRequiresAttrInfo *> Unpack() {
+    if (is<RequiresCapabilityAttr *>()) {
+      auto ReqAttr = get<RequiresCapabilityAttr *>();
+      assert(ReqAttr->args_size() > 0);
+      return {ReqAttr->args(), nullptr};
+    } else {
+      auto DynReqAttr = get<DynamicRequiresCapabilityAttr *>();
+      return {llvm::make_range<Expr **>(&DynReqAttr->CapExpr,
+                                        &DynReqAttr->CapExpr + 1),
+              &DynReqAttr->Info};
+    }
+  }
+};
+
+struct TrackingCapability {
+  llvm::SmallVector<AnyRequiresAttr, 4> RequireAttrs;
+  const ValueDecl *AttachedDecl;
+  SourceRange OriginRange;
+
+  TrackingCapability(llvm::SmallVector<AnyRequiresAttr, 4> RequireAttrs,
+                     const ValueDecl *AttachedDecl, SourceRange OriginRange)
+      : RequireAttrs(std::move(RequireAttrs)), AttachedDecl(AttachedDecl),
+        OriginRange(OriginRange) {
+    assert(!this->RequireAttrs.empty());
+  }
+
+  bool operator==(const TrackingCapability &rhs) const {
+    return AttachedDecl == rhs.AttachedDecl && RequireAttrs == rhs.RequireAttrs;
+  }
+};
+
+using TrackingPtr = llvm::PointerUnion<const Stmt *, const ValueDecl *>;
+
 /// Class which implements the core thread safety analysis routines.
 class ThreadSafetyAnalyzer {
   friend class BuildLockset;
+  friend class LocalVarFollower;
   friend class threadSafety::BeforeSet;
 
   llvm::BumpPtrAllocator Bpa;
@@ -1015,11 +1098,29 @@ class ThreadSafetyAnalyzer {
   FactManager FactMan;
   std::vector<CFGBlockInfo> BlockInfo;
 
+  /// For current function, bool indicated whether we must add unhold
+  /// capabilities to declared scope
+  // TODO: fix description
+  bool DynamicRequiresAllowed = false;
+  DynamicRequiresAttributes* GlobalDynamicRequires;
+  CapabilityExpr CurrentMethodDynamicRequiresAttr{};
+
+  bool TrackingCapabilitiesAllowed = false;
+  llvm::DenseMap<TrackingPtr, const TrackingCapability *> TrackingData;
+  llvm::BumpPtrAllocator TrackingDataArena;
+
   BeforeSet *GlobalBeforeSet;
+  llvm::SmallVector<StringRef> &CapabilityHolders;
+  llvm::SmallVector<DetachedExecuteWithCapabilityAttr *>
+      &ExecuteWithCapabilityAttrs;
 
 public:
-  ThreadSafetyAnalyzer(ThreadSafetyHandler &H, BeforeSet* Bset)
-      : Arena(&Bpa), SxBuilder(Arena), Handler(H), GlobalBeforeSet(Bset) {}
+  ThreadSafetyAnalyzer(ThreadSafetyHandler &H, AnalysisCache *ACache)
+      : Arena(&Bpa), SxBuilder(Arena), Handler(H),
+        GlobalDynamicRequires(&ACache->ReqAttrs),
+        GlobalBeforeSet(&ACache->BSet),
+        CapabilityHolders(ACache->CapabilityHolders),
+        ExecuteWithCapabilityAttrs(ACache->ExecuteWithCapabilityAttrs) {}
 
   bool inCurrentScope(const CapabilityExpr &CapE);
 
@@ -1058,17 +1159,23 @@ public:
 
   void runAnalysis(AnalysisDeclContext &AC);
 
-  void warnIfMutexNotHeld(const FactSet &FSet, const NamedDecl *D,
-                          const Expr *Exp, AccessKind AK, Expr *MutexExp,
-                          ProtectedOperationKind POK, til::LiteralPtr *Self,
-                          SourceLocation Loc);
+  bool insertDynamicRequiresCapAttr(FactSet &FSet, const CapabilityExpr &Cp,
+                                    Expr *MutexExp, AccessKind AK,
+                                    til::LiteralPtr *Self, SourceLocation Loc);
+
+  void warnIfMutexNotHeld(
+      FactSet &FSet, const NamedDecl *D, const Expr *Exp, AccessKind AK,
+      Expr *MutexExp, ProtectedOperationKind POK, til::LiteralPtr *Self,
+      SourceLocation Loc,
+      std::optional<SourceRange> TrackingOriginLoc = std::nullopt,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr = nullptr);
   void warnIfMutexHeld(const FactSet &FSet, const NamedDecl *D, const Expr *Exp,
                        Expr *MutexExp, til::LiteralPtr *Self,
                        SourceLocation Loc);
 
-  void checkAccess(const FactSet &FSet, const Expr *Exp, AccessKind AK,
+  void checkAccess(FactSet &FSet, const Expr *Exp, AccessKind AK,
                    ProtectedOperationKind POK);
-  void checkPtAccess(const FactSet &FSet, const Expr *Exp, AccessKind AK,
+  void checkPtAccess(FactSet &FSet, const Expr *Exp, AccessKind AK,
                      ProtectedOperationKind POK);
 };
 
@@ -1282,6 +1389,8 @@ void ThreadSafetyAnalyzer::addLock(FactSet &FSet,
     GlobalBeforeSet->checkBeforeAfter(Entry->valueDecl(), FSet, *this,
                                       Entry->loc(), Entry->getKind());
   }
+
+  // todo: check there's no second thread lock
 
   // FIXME: Don't always warn when we have support for reentrant locks.
   if (const FactEntry *Cp = FSet.findLock(FactMan, *Entry)) {
@@ -1503,7 +1612,7 @@ void ThreadSafetyAnalyzer::getEdgeLockset(FactSet& Result,
                     Exp, FunDecl, PredBlock, CurrBlock, A->getSuccessValue(),
                     Negate);
         break;
-      };
+      }
       case attr::ExclusiveTrylockFunction: {
         const auto *A = cast<ExclusiveTrylockFunctionAttr>(Attr);
         getMutexIDs(ExclusiveLocksToAdd, A, Exp, FunDecl, PredBlock, CurrBlock,
@@ -1533,6 +1642,30 @@ void ThreadSafetyAnalyzer::getEdgeLockset(FactSet& Result,
 
 namespace {
 
+static const Expr *UnpackConstruction(const Expr *E) {
+  if (auto *CE = dyn_cast<CastExpr>(E))
+    if (CE->getCastKind() == CK_NoOp)
+      E = CE->getSubExpr()->IgnoreParens();
+  if (auto *CE = dyn_cast<CastExpr>(E))
+    if (CE->getCastKind() == CK_ConstructorConversion ||
+        CE->getCastKind() == CK_UserDefinedConversion)
+      E = CE->getSubExpr();
+  if (auto *BTE = dyn_cast<CXXBindTemporaryExpr>(E))
+    E = BTE->getSubExpr();
+  return E;
+}
+
+static const Expr *UnpackTemporaryConstruction(const Expr *E) {
+  E = E->IgnoreParens();
+
+  // handle constructors that involve temporaries
+  if (auto *EWC = dyn_cast<ExprWithCleanups>(E))
+    E = EWC->getSubExpr()->IgnoreParens();
+  E = UnpackConstruction(E);
+
+  return E;
+}
+
 /// We use this class to visit different types of expressions in
 /// CFGBlocks, and build up the lockset.
 /// An expression may cause us to add or remove locks from the lockset, or else
@@ -1540,11 +1673,12 @@ namespace {
 /// FIXME: In future, we may be able to not inherit from a visitor.
 class BuildLockset : public ConstStmtVisitor<BuildLockset> {
   friend class ThreadSafetyAnalyzer;
+  friend class LocalVarFollower;
 
   ThreadSafetyAnalyzer *Analyzer;
   FactSet FSet;
   // The fact set for the function on exit.
-  const FactSet &FunctionExitFSet;
+  FactSet &FunctionExitFSet;
   LocalVariableMap::Context LVarCtx;
   unsigned CtxIndex;
 
@@ -1562,14 +1696,106 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
   void handleCall(const Expr *Exp, const NamedDecl *D,
                   til::LiteralPtr *Self = nullptr,
                   SourceLocation Loc = SourceLocation());
-  void examineArguments(const FunctionDecl *FD,
+  void examineArguments(const FunctionDecl *FD, const Expr *Exp,
                         CallExpr::const_arg_iterator ArgBegin,
                         CallExpr::const_arg_iterator ArgEnd,
                         bool SkipFirstParam = false);
 
+  // helpers for tracking values
+  inline void AddTrackingData(TrackingPtr key, const TrackingCapability *value,
+                              const Stmt *origin = nullptr) {
+#ifdef PRINT_DEBUG_LOGS
+    llvm::errs()
+        << "TrackingData: "
+        << (key.is<const Stmt *>()
+                ? key.get<const Stmt *>()->getStmtClassName()
+                : key.get<const ValueDecl *>()->getDeclName().getAsString())
+        << ' ' << value->AttachedDecl->getQualifiedNameAsString() << '\n';
+#endif
+
+    if (Analyzer->TrackingCapabilitiesAllowed) {
+      auto [it, newValue] = Analyzer->TrackingData.insert({key, value});
+
+      if (!newValue && it->second != value) {
+        if (key.is<const Stmt *>() && !origin)
+          origin = key.get<const Stmt *>();
+        assert(origin);
+        Analyzer->Handler.handleTrackingValuesModelFailure(
+            origin, "second tracking capability", origin->getBeginLoc());
+      }
+    }
+  }
+
+  inline const TrackingCapability *FindTrackingData(const Stmt *key) {
+    if (key == nullptr)
+      return nullptr;
+    if (auto *KeyExpr = dyn_cast_or_null<Expr>(key))
+      key = UnpackTemporaryConstruction(KeyExpr);
+    auto I = Analyzer->TrackingData.find(key);
+    return (I != Analyzer->TrackingData.end()) ? I->getSecond() : nullptr;
+  }
+
+  inline const TrackingCapability *FindTrackingData(const ValueDecl *key) {
+    if (key == nullptr)
+      return nullptr;
+    auto I = Analyzer->TrackingData.find(key);
+    return (I != Analyzer->TrackingData.end()) ? I->getSecond() : nullptr;
+  }
+
+  inline const DynamicRequiresAttrInfo *
+  GetDynamicInfo(const CXXMethodDecl *MethodDecl) {
+    if (!MethodDecl)
+      return nullptr;
+    return &Analyzer->GlobalDynamicRequires->at(MethodDecl)->Info;
+  }
+
+  inline const Expr *getObjectArgument(const Expr *CallExp) {
+    if (auto MCE = dyn_cast_or_null<CXXMemberCallExpr>(CallExp)) {
+      return UnpackTemporaryConstruction(MCE->getImplicitObjectArgument());
+    }
+    if (auto OC = dyn_cast_or_null<CXXOperatorCallExpr>(CallExp)) {
+      return UnpackTemporaryConstruction(OC->getArg(0));
+    }
+    return nullptr;
+  }
+
+  inline bool shouldExamineCall(const Decl *D, const Expr *SelfExp) {
+    if (!D)
+      return false;
+    return D->hasAttrs() ||
+           (isa<CXXMethodDecl>(D) && Analyzer->GlobalDynamicRequires->contains(
+                                         cast<CXXMethodDecl>(D))) ||
+           (SelfExp && FindTrackingData(SelfExp));
+  }
+
+  TrackingCapability *FindRequiresCapabilityFromDecl(const ValueDecl *Decl,
+                                                     const Expr *Exp);
+
+  bool isContainerLikeFunction(const FunctionDecl *FD);
+  bool findExecuteWithCapabilityAttrArg(const FunctionDecl *FD,
+                                        llvm::iterator_range<Expr **> &Args);
+
+  void examineArgumentWithCapability(const FunctionDecl *FD, const Expr *Exp,
+                                     const Expr *ArgExp,
+                                     const TrackingCapability *Cap);
+
+  CapExprSet TranslateRequiresAttr(AnyRequiresAttr Attr,
+                                   const ValueDecl *AttachedDecl,
+                                   const Expr *Exp,
+                                   DynamicRequiresAttrInfo **FromDynamicAttr);
+
+  bool GetOutputInfoForFirstAttr(const TrackingCapability &TrackingCap,
+                                 const Expr *Exp, std::string &CapName,
+                                 StringRef &CapKind,
+                                 DynamicRequiresAttrInfo *&FromDynamicAttr);
+
+  void warnIfAccessableOutOfScope(const Expr *LHS,
+                                  const TrackingCapability *Cap,
+                                  const Expr *Exp);
+
 public:
   BuildLockset(ThreadSafetyAnalyzer *Anlzr, CFGBlockInfo &Info,
-               const FactSet &FunctionExitFSet)
+               FactSet &FunctionExitFSet)
       : ConstStmtVisitor<BuildLockset>(), Analyzer(Anlzr), FSet(Info.EntrySet),
         FunctionExitFSet(FunctionExitFSet), LVarCtx(Info.EntryContext),
         CtxIndex(Info.EntryIndex) {}
@@ -1582,16 +1808,76 @@ public:
   void VisitDeclStmt(const DeclStmt *S);
   void VisitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *Exp);
   void VisitReturnStmt(const ReturnStmt *S);
+
+  void VisitCXXBindTemporaryExpr(const CXXBindTemporaryExpr *Exp);
+  void VisitCXXNewExpr(const CXXNewExpr *Exp);
+
+  // Origins of tracking values
+  void VisitDeclRefExpr(const DeclRefExpr *DRE);
+  void VisitLambdaExpr(const LambdaExpr *LE);
+  void VisitMemberExpr(const MemberExpr *Exp);
+
+  // Fallback for tracking values
+  void VisitStmt(const Stmt *S);
 };
 
 } // namespace
 
+bool ThreadSafetyAnalyzer::insertDynamicRequiresCapAttr(
+    FactSet &FSet, const CapabilityExpr &Cp, Expr *MutexExp, AccessKind AK,
+    til::LiteralPtr *Self, SourceLocation Loc) {
+  if (Cp.getKind() != "thread" || !DynamicRequiresAllowed ||
+      Self /*Self will not outlive analysis of this function */) {
+    return false;
+  }
+
+  for (auto LockID : FSet) {
+    const auto &Lock = FactMan[LockID];
+    if (Lock.getKind() == "thread" && !Lock.equals(Cp)) {
+      return false;
+    }
+  }
+
+  if (!CurrentMethodDynamicRequiresAttr.shouldIgnore() &&
+      !CurrentMethodDynamicRequiresAttr.equals(Cp)) {
+    return false;
+  }
+
+  const auto *CurrentMethod = dyn_cast_or_null<CXXMethodDecl>(CurrentFunction);
+  if (!CurrentMethod)
+    return false;
+
+  // Okey, add the dynamic requires attribute
+
+  assert(MutexExp);
+  auto globalRequires = std::make_unique<DynamicRequiresCapabilityAttr>(
+      MutexExp, CurrentMethod, AK, CurrentMethod->getParent()->getLocation(),
+      Loc, Cp.toString());
+  GlobalDynamicRequires->insert({CurrentMethod, std::move(globalRequires)});
+
+  CurrentMethodDynamicRequiresAttr = Cp;
+
+  addLock(FSet, std::make_unique<LockableFactEntry>(Cp, LK_Exclusive, Loc,
+                                                    FactEntry::Asserted));
+
+#ifdef PRINT_DEBUG_LOGS
+  llvm::errs() << "DynamicRequiresAttr: "
+               << CurrentMethod->getQualifiedNameAsString() << ' '
+               << Cp.toString() << '\n';
+#endif
+
+  Handler.handleVerboseDynamicRequiresAttribute(CurrentMethod, Cp.toString());
+
+  return true;
+}
+
 /// Warn if the LSet does not contain a lock sufficient to protect access
 /// of at least the passed in AccessKind.
 void ThreadSafetyAnalyzer::warnIfMutexNotHeld(
-    const FactSet &FSet, const NamedDecl *D, const Expr *Exp, AccessKind AK,
+    FactSet &FSet, const NamedDecl *D, const Expr *Exp, AccessKind AK,
     Expr *MutexExp, ProtectedOperationKind POK, til::LiteralPtr *Self,
-    SourceLocation Loc) {
+    SourceLocation Loc, std::optional<SourceRange> TrackingOriginLoc,
+    const DynamicRequiresAttrInfo *DynamicRequiresAttr) {
   LockKind LK = getLockKindFromAccessKind(AK);
   CapabilityExpr Cp = SxBuilder.translateAttrExpr(MutexExp, D, Exp, Self);
   if (Cp.isInvalid()) {
@@ -1600,6 +1886,14 @@ void ThreadSafetyAnalyzer::warnIfMutexNotHeld(
   } else if (Cp.shouldIgnore()) {
     return;
   }
+
+#ifdef PRINT_DEBUG_LOGS
+  llvm::errs() << "warnIfMutexNotHeld on " << Cp.toString() << " FSet:";
+  for (auto FactID : FSet) {
+    llvm::errs() << " " << FactMan[FactID].toString();
+  }
+  llvm::errs() << '\n';
+#endif
 
   if (Cp.negative()) {
     // Negative capabilities act like locks excluded
@@ -1612,7 +1906,9 @@ void ThreadSafetyAnalyzer::warnIfMutexNotHeld(
 
     // If this does not refer to a negative capability in the same class,
     // then stop here.
-    if (!inCurrentScope(Cp))
+    // However, if current method is a supported lambda, insert dynamic attr.
+    if (!inCurrentScope(Cp) &&
+        !insertDynamicRequiresCapAttr(FSet, Cp, MutexExp, AK, Self, Loc))
       return;
 
     // Otherwise the negative requirement must be propagated to the caller.
@@ -1631,18 +1927,27 @@ void ThreadSafetyAnalyzer::warnIfMutexNotHeld(
     if (LDat) {
       // Warn that there's no precise match.
       std::string PartMatchStr = LDat->toString();
-      StringRef   PartMatchName(PartMatchStr);
+      StringRef PartMatchName(PartMatchStr);
       Handler.handleMutexNotHeld(Cp.getKind(), D, POK, Cp.toString(), LK, Loc,
-                                 &PartMatchName);
+                                 &PartMatchName, TrackingOriginLoc,
+                                 DynamicRequiresAttr);
+      NoError = false;
     } else {
-      // Warn that there's no match at all.
-      Handler.handleMutexNotHeld(Cp.getKind(), D, POK, Cp.toString(), LK, Loc);
+      // There's no match at all.
+      if (!insertDynamicRequiresCapAttr(FSet, Cp, MutexExp, AK, Self, Loc)) {
+        // Warn
+        Handler.handleMutexNotHeld(Cp.getKind(), D, POK, Cp.toString(), LK, Loc,
+                                   nullptr, TrackingOriginLoc,
+                                   DynamicRequiresAttr);
+        NoError = false;
+      }
     }
-    NoError = false;
   }
   // Make sure the mutex we found is the right kind.
   if (NoError && LDat && !LDat->isAtLeast(LK)) {
-    Handler.handleMutexNotHeld(Cp.getKind(), D, POK, Cp.toString(), LK, Loc);
+    Handler.handleMutexNotHeld(Cp.getKind(), D, POK, Cp.toString(), LK, Loc,
+                               nullptr, TrackingOriginLoc, DynamicRequiresAttr);
+    NoError = false;
   }
 }
 
@@ -1660,6 +1965,14 @@ void ThreadSafetyAnalyzer::warnIfMutexHeld(const FactSet &FSet,
     return;
   }
 
+#ifdef PRINT_DEBUG_LOGS
+  llvm::errs() << "warnIfMutexHeld on (not) " << Cp.toString() << " FSet:";
+  for (auto FactID : FSet) {
+    llvm::errs() << " " << FactMan[FactID].toString();
+  }
+  llvm::errs() << '\n';
+#endif
+
   const FactEntry *LDat = FSet.findLock(FactMan, Cp);
   if (LDat) {
     Handler.handleFunExcludesLock(Cp.getKind(), D->getNameAsString(),
@@ -1672,7 +1985,7 @@ void ThreadSafetyAnalyzer::warnIfMutexHeld(const FactSet &FSet,
 /// marked with guarded_by, we must ensure the appropriate mutexes are held.
 /// Similarly, we check if the access is to an expression that dereferences
 /// a pointer marked with pt_guarded_by.
-void ThreadSafetyAnalyzer::checkAccess(const FactSet &FSet, const Expr *Exp,
+void ThreadSafetyAnalyzer::checkAccess(FactSet &FSet, const Expr *Exp,
                                        AccessKind AK,
                                        ProtectedOperationKind POK) {
   Exp = Exp->IgnoreImplicit()->IgnoreParenCasts();
@@ -1739,7 +2052,7 @@ void ThreadSafetyAnalyzer::checkAccess(const FactSet &FSet, const Expr *Exp,
 
 /// Checks pt_guarded_by and pt_guarded_var attributes.
 /// POK is the same  operationKind that was passed to checkAccess.
-void ThreadSafetyAnalyzer::checkPtAccess(const FactSet &FSet, const Expr *Exp,
+void ThreadSafetyAnalyzer::checkPtAccess(FactSet &FSet, const Expr *Exp,
                                          AccessKind AK,
                                          ProtectedOperationKind POK) {
   while (true) {
@@ -1770,8 +2083,9 @@ void ThreadSafetyAnalyzer::checkPtAccess(const FactSet &FSet, const Expr *Exp,
   if (!D || !D->hasAttrs())
     return;
 
-  if (D->hasAttr<PtGuardedVarAttr>() && FSet.isEmpty(FactMan))
+  if (D->hasAttr<PtGuardedVarAttr>() && FSet.isEmpty(FactMan)) {
     Handler.handleNoMutexHeld(D, PtPOK, AK, Exp->getExprLoc());
+  }
 
   for (auto const *I : D->specific_attrs<PtGuardedByAttr>())
     warnIfMutexNotHeld(FSet, D, Exp, AK, I->getArg(), PtPOK, nullptr,
@@ -1913,6 +2227,49 @@ void BuildLockset::handleCall(const Expr *Exp, const NamedDecl *D,
     }
   }
 
+  DynamicRequiresCapabilityAttr *CheckedDynRequiresCapAttr = nullptr;
+  if (const auto *MethodD = dyn_cast<CXXMethodDecl>(D))
+    if (auto I = Analyzer->GlobalDynamicRequires->find(MethodD);
+        I != Analyzer->GlobalDynamicRequires->end()) {
+      CheckedDynRequiresCapAttr = I->getSecond().get();
+      Analyzer->warnIfMutexNotHeld(FSet, D, Exp, AK_Written,
+                                   CheckedDynRequiresCapAttr->CapExpr,
+                                   POK_FunctionCall, nullptr, Loc, std::nullopt,
+                                   &CheckedDynRequiresCapAttr->Info);
+    }
+
+  if (const auto *CallExp = dyn_cast_or_null<CallExpr>(Exp))
+    if (const auto *TrackingCap =
+            FindTrackingData(getObjectArgument(CallExp))) {
+      if (isa<CXXConversionDecl>(D))
+        AddTrackingData(TrackingPtr(Exp), TrackingCap);
+      else {
+        for (auto AnyReqAttr : TrackingCap->RequireAttrs) {
+          if (AnyReqAttr.is<RequiresCapabilityAttr *>()) {
+            auto A = AnyReqAttr.get<RequiresCapabilityAttr *>();
+            if (std::find(D->attr_begin(), D->attr_end(), A) != D->attr_end())
+              // already handled above by iterating over D->attrs()
+              continue;
+
+            for (auto *Arg : A->args()) {
+              Analyzer->warnIfMutexNotHeld(
+                  FSet, D, Exp, A->isShared() ? AK_Read : AK_Written, Arg,
+                  POK_FunctionCall, Self, Loc, TrackingCap->OriginRange);
+            }
+          } else {
+            auto DynA = AnyReqAttr.get<DynamicRequiresCapabilityAttr *>();
+            if (DynA == CheckedDynRequiresCapAttr)
+              // already handled above from Analyzer->GlobalDynamicRequires
+              continue;
+
+            Analyzer->warnIfMutexNotHeld(FSet, D, Exp, DynA->AK, DynA->CapExpr,
+                                         POK_FunctionCall, Self, Loc,
+                                         TrackingCap->OriginRange, &DynA->Info);
+          }
+        }
+      }
+    }
+
   // Remove locks first to allow lock upgrading/downgrading.
   // FIXME -- should only fully remove if the attribute refers to 'this'.
   bool Dtor = isa<CXXDestructorDecl>(D);
@@ -1954,15 +2311,32 @@ void BuildLockset::handleCall(const Expr *Exp, const NamedDecl *D,
 /// check whether we hold any required mutexes. Reads are checked in
 /// VisitCastExpr.
 void BuildLockset::VisitUnaryOperator(const UnaryOperator *UO) {
+  auto Cap = FindTrackingData(UO->getSubExpr());
+  bool CapHandled = false;
+
   switch (UO->getOpcode()) {
-    case UO_PostDec:
-    case UO_PostInc:
-    case UO_PreDec:
-    case UO_PreInc:
-      checkAccess(UO->getSubExpr(), AK_Written);
-      break;
-    default:
-      break;
+  case UO_PostDec:
+  case UO_PostInc:
+  case UO_PreDec:
+  case UO_PreInc:
+    checkAccess(UO->getSubExpr(), AK_Written);
+    break;
+
+  case UO_Deref:
+  case UO_AddrOf:
+    if (Cap) {
+      AddTrackingData(UO, Cap);
+      CapHandled = true;
+    }
+    break;
+
+  default:
+    break;
+  }
+
+  if (Cap && !CapHandled) {
+    Analyzer->Handler.handleTrackingValuesModelFailure(
+        UO, "unsupported op on UnaryOperator", UO->getBeginLoc());
   }
 }
 
@@ -1970,25 +2344,41 @@ void BuildLockset::VisitUnaryOperator(const UnaryOperator *UO) {
 /// whether we hold any required mutexes.
 /// FIXME: Deal with non-primitive types.
 void BuildLockset::VisitBinaryOperator(const BinaryOperator *BO) {
-  if (!BO->isAssignmentOp())
+  const auto *RHSCap = FindTrackingData(BO->getRHS());
+
+  if (!BO->isAssignmentOp()) {
+    if (RHSCap || FindTrackingData(BO->getLHS())) {
+      Analyzer->Handler.handleTrackingValuesModelFailure(
+          BO, "non-assignment BinaryOperator is not supported yet",
+          BO->getBeginLoc());
+    }
+
     return;
+  }
 
   // adjust the context
   LVarCtx = Analyzer->LocalVarMap.getNextContext(CtxIndex, BO, LVarCtx);
 
   checkAccess(BO->getLHS(), AK_Written);
+
+  if (RHSCap) {
+    warnIfAccessableOutOfScope(UnpackTemporaryConstruction(BO->getLHS()),
+                               RHSCap, BO);
+  }
 }
 
 /// Whenever we do an LValue to Rvalue cast, we are reading a variable and
 /// need to ensure we hold any required mutexes.
 /// FIXME: Deal with non-primitive types.
 void BuildLockset::VisitCastExpr(const CastExpr *CE) {
-  if (CE->getCastKind() != CK_LValueToRValue)
-    return;
-  checkAccess(CE->getSubExpr(), AK_Read);
+  if (CE->getCastKind() == CK_LValueToRValue)
+    checkAccess(CE->getSubExpr(), AK_Read);
+
+  if (auto Cap = FindTrackingData(CE->getSubExpr()))
+    AddTrackingData(CE, Cap);
 }
 
-void BuildLockset::examineArguments(const FunctionDecl *FD,
+void BuildLockset::examineArguments(const FunctionDecl *FD, const Expr *Exp,
                                     CallExpr::const_arg_iterator ArgBegin,
                                     CallExpr::const_arg_iterator ArgEnd,
                                     bool SkipFirstParam) {
@@ -2015,14 +2405,138 @@ void BuildLockset::examineArguments(const FunctionDecl *FD,
     QualType Qt = (*Param)->getType();
     if (Qt->isReferenceType())
       checkAccess(*Arg, AK_Read, POK_PassByRef);
+
+    if (auto Cap = FindTrackingData(*Arg)) {
+      examineArgumentWithCapability(FD, Exp, *Arg, Cap);
+    }
+  }
+}
+
+bool BuildLockset::isContainerLikeFunction(const FunctionDecl *FD) {
+  const auto containsNameInAllowedList = [this](StringRef Name) -> bool {
+    return std::find(Analyzer->CapabilityHolders.begin(),
+                     Analyzer->CapabilityHolders.end(),
+                     Name) != Analyzer->CapabilityHolders.end();
+  };
+
+  if (FD->hasAttr<CapabilityHolderAttr>())
+    return true;
+
+  if (auto Ctor = dyn_cast_or_null<CXXConstructorDecl>(FD)) {
+    return Ctor->isCopyOrMoveConstructor() ||
+           containsNameInAllowedList(
+               Ctor->getParent()->getQualifiedNameAsString());
+  } else {
+    return containsNameInAllowedList(FD->getQualifiedNameAsString());
+  }
+
+  return false;
+}
+
+bool BuildLockset::findExecuteWithCapabilityAttrArg(
+    const FunctionDecl *FD, llvm::iterator_range<Expr **> &Args) {
+  if (FD->hasAttr<ExecuteWithCapabilityAttr>()) {
+    Args = FD->getAttr<ExecuteWithCapabilityAttr>()->args();
+    return true;
+  }
+
+  for (auto &DetachedAttr : Analyzer->ExecuteWithCapabilityAttrs) {
+    if (DetachedAttr->getDeclType() == FD->getQualifiedNameAsString()) {
+      Args = DetachedAttr->args();
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void BuildLockset::examineArgumentWithCapability(
+    const FunctionDecl *FD, const Expr *Exp, const Expr *ArgExp,
+    const TrackingCapability *Cap) {
+  llvm::iterator_range<Expr **> ExecuteWithCapAttrArgs =
+      llvm::make_range(nullptr, nullptr);
+  if (findExecuteWithCapabilityAttrArg(FD, ExecuteWithCapAttrArgs)) {
+    auto CallExp = dyn_cast_or_null<CXXMemberCallExpr>(Exp);
+    if (!CallExp)
+      return;
+
+    // Make acquired caps
+    CapExprSet AcquiredCaps;
+    llvm::SmallVector<Expr *, 1> EmptyArgExpr(1, nullptr);
+    for (Expr *ArgAttr : ExecuteWithCapAttrArgs.empty()
+                             ? EmptyArgExpr
+                             : ExecuteWithCapAttrArgs) {
+      if (auto *StringArg = dyn_cast_or_null<StringLiteral>(ArgAttr);
+          StringArg && StringArg->getString() == "*") {
+        for (auto FactID : FSet) {
+          AcquiredCaps.push_back(Analyzer->FactMan[FactID]);
+        }
+      } else {
+        CapabilityExpr CpThis =
+            Analyzer->SxBuilder.translateAttrExpr(ArgAttr, FD, Exp, nullptr);
+        if (CpThis.isInvalid()) {
+          warnInvalidLock(Analyzer->Handler, nullptr, FD, Exp,
+                          CpThis.getKind());
+          return;
+        } else if (!CpThis.shouldIgnore())
+          AcquiredCaps.push_back(std::move(CpThis));
+      }
+    }
+
+    // Make required caps
+    llvm::SmallVector<std::pair<CapabilityExpr, DynamicRequiresAttrInfo *>, 2>
+        RequiredCaps;
+    for (auto &RequireAttr : Cap->RequireAttrs) {
+      DynamicRequiresAttrInfo *FromDynamicRequires = nullptr;
+      for (auto Cp : TranslateRequiresAttr(RequireAttr, Cap->AttachedDecl,
+                                           nullptr, &FromDynamicRequires)) {
+        RequiredCaps.emplace_back(std::move(Cp), FromDynamicRequires);
+      }
+    }
+
+    // Check required caps are subset of acquired caps
+    for (auto &RequiredCap : RequiredCaps) {
+      bool satisfied =
+          std::any_of(AcquiredCaps.begin(), AcquiredCaps.end(),
+                      [&RequiredCap](const CapabilityExpr &AcqCap) {
+                        return RequiredCap.first.equals(AcqCap);
+                      });
+      if (!satisfied) {
+        llvm::SmallVector<std::string> AcquiredCapNames;
+        for (auto &Cap : AcquiredCaps)
+          if (!Cap.negative())
+            AcquiredCapNames.push_back(Cap.toString());
+
+        Analyzer->Handler.handleExecWithCapabilityUnsatisfied(
+            ArgExp->getBeginLoc(), CallExp->getMethodDecl(),
+            RequiredCap.first.toString(), AcquiredCapNames, RequiredCap.second);
+        break;
+      }
+    }
+  } else if (isContainerLikeFunction(FD)) {
+    AddTrackingData(TrackingPtr(Exp), Cap);
+    if (auto *Obj = getObjectArgument(Exp))
+      warnIfAccessableOutOfScope(Obj, Cap, Exp);
+  } else {
+    StringRef CapKind;
+    std::string CapName;
+    DynamicRequiresAttrInfo *FromDynamicRequires = nullptr;
+    if (GetOutputInfoForFirstAttr(*Cap, ArgExp, CapName, CapKind,
+                                  FromDynamicRequires)) {
+      Analyzer->Handler.handleFunctionalObjectLosesRequiresAttr(
+          CapKind, CapName, clang::threadSafety::VLAK_ByPassingAsArgument,
+          ArgExp->getSourceRange(), Cap->OriginRange, FromDynamicRequires);
+    }
   }
 }
 
 void BuildLockset::VisitCallExpr(const CallExpr *Exp) {
+  const Expr *ObjectArgument = nullptr;
   if (const auto *CE = dyn_cast<CXXMemberCallExpr>(Exp)) {
     const auto *ME = dyn_cast<MemberExpr>(CE->getCallee());
     // ME can be null when calling a method pointer
     const CXXMethodDecl *MD = CE->getMethodDecl();
+    ObjectArgument = CE->getImplicitObjectArgument();
 
     if (ME && MD) {
       if (ME->isArrow()) {
@@ -2034,55 +2548,62 @@ void BuildLockset::VisitCallExpr(const CallExpr *Exp) {
       }
     }
 
-    examineArguments(CE->getDirectCallee(), CE->arg_begin(), CE->arg_end());
+    examineArguments(CE->getDirectCallee(), Exp, CE->arg_begin(),
+                     CE->arg_end());
   } else if (const auto *OE = dyn_cast<CXXOperatorCallExpr>(Exp)) {
+    ObjectArgument = OE->getArg(0);
     OverloadedOperatorKind OEop = OE->getOperator();
     switch (OEop) {
-      case OO_Equal:
-      case OO_PlusEqual:
-      case OO_MinusEqual:
-      case OO_StarEqual:
-      case OO_SlashEqual:
-      case OO_PercentEqual:
-      case OO_CaretEqual:
-      case OO_AmpEqual:
-      case OO_PipeEqual:
-      case OO_LessLessEqual:
-      case OO_GreaterGreaterEqual:
-        checkAccess(OE->getArg(1), AK_Read);
-        [[fallthrough]];
-      case OO_PlusPlus:
-      case OO_MinusMinus:
-        checkAccess(OE->getArg(0), AK_Written);
-        break;
-      case OO_Star:
-      case OO_ArrowStar:
-      case OO_Arrow:
-      case OO_Subscript:
-        if (!(OEop == OO_Star && OE->getNumArgs() > 1)) {
-          // Grrr.  operator* can be multiplication...
-          checkPtAccess(OE->getArg(0), AK_Read);
-        }
-        [[fallthrough]];
-      default: {
-        // TODO: get rid of this, and rely on pass-by-ref instead.
-        const Expr *Obj = OE->getArg(0);
-        checkAccess(Obj, AK_Read);
-        // Check the remaining arguments. For method operators, the first
-        // argument is the implicit self argument, and doesn't appear in the
-        // FunctionDecl, but for non-methods it does.
-        const FunctionDecl *FD = OE->getDirectCallee();
-        examineArguments(FD, std::next(OE->arg_begin()), OE->arg_end(),
-                         /*SkipFirstParam*/ !isa<CXXMethodDecl>(FD));
-        break;
+    case OO_Equal:
+      if (auto *Cap = FindTrackingData(OE->getArg(1)))
+        if (auto *FD = OE->getDirectCallee())
+          examineArgumentWithCapability(FD, OE, OE->getArg(1), Cap);
+      [[fallthrough]];
+    case OO_PlusEqual:
+    case OO_MinusEqual:
+    case OO_StarEqual:
+    case OO_SlashEqual:
+    case OO_PercentEqual:
+    case OO_CaretEqual:
+    case OO_AmpEqual:
+    case OO_PipeEqual:
+    case OO_LessLessEqual:
+    case OO_GreaterGreaterEqual:
+      checkAccess(OE->getArg(1), AK_Read);
+      [[fallthrough]];
+    case OO_PlusPlus:
+    case OO_MinusMinus:
+      checkAccess(OE->getArg(0), AK_Written);
+      break;
+    case OO_Star:
+    case OO_ArrowStar:
+    case OO_Arrow:
+    case OO_Subscript:
+      if (!(OEop == OO_Star && OE->getNumArgs() > 1)) {
+        // Grrr.  operator* can be multiplication...
+        checkPtAccess(OE->getArg(0), AK_Read);
       }
+      [[fallthrough]];
+    default: {
+      // TODO: get rid of this, and rely on pass-by-ref instead.
+      const Expr *Obj = OE->getArg(0);
+      checkAccess(Obj, AK_Read);
+      // Check the remaining arguments. For method operators, the first
+      // argument is the implicit self argument, and doesn't appear in the
+      // FunctionDecl, but for non-methods it does.
+      const FunctionDecl *FD = OE->getDirectCallee();
+      examineArguments(FD, Exp, std::next(OE->arg_begin()), OE->arg_end(),
+                       /*SkipFirstParam*/ !isa<CXXMethodDecl>(FD));
+      break;
+    }
     }
   } else {
-    examineArguments(Exp->getDirectCallee(), Exp->arg_begin(), Exp->arg_end());
+    examineArguments(Exp->getDirectCallee(), Exp, Exp->arg_begin(),
+                     Exp->arg_end());
   }
 
   auto *D = dyn_cast_or_null<NamedDecl>(Exp->getCalleeDecl());
-  if(!D || !D->hasAttrs())
+  if (!shouldExamineCall(D, ObjectArgument))
     return;
   handleCall(Exp, D);
 }
@@ -2092,24 +2613,16 @@ void BuildLockset::VisitCXXConstructExpr(const CXXConstructExpr *Exp) {
   if (D && D->isCopyConstructor()) {
     const Expr* Source = Exp->getArg(0);
     checkAccess(Source, AK_Read);
-  } else {
-    examineArguments(D, Exp->arg_begin(), Exp->arg_end());
-  }
-  if (D && D->hasAttrs())
-    handleCall(Exp, D);
-}
 
-static const Expr *UnpackConstruction(const Expr *E) {
-  if (auto *CE = dyn_cast<CastExpr>(E))
-    if (CE->getCastKind() == CK_NoOp)
-      E = CE->getSubExpr()->IgnoreParens();
-  if (auto *CE = dyn_cast<CastExpr>(E))
-    if (CE->getCastKind() == CK_ConstructorConversion ||
-        CE->getCastKind() == CK_UserDefinedConversion)
-      E = CE->getSubExpr();
-  if (auto *BTE = dyn_cast<CXXBindTemporaryExpr>(E))
-    E = BTE->getSubExpr();
-  return E;
+    // Handling args tracking data is implemented in examineArguments, but here
+    // we don't call it
+    if (auto Cap = FindTrackingData(Source))
+      examineArgumentWithCapability(D, Exp, Source, Cap);
+  } else {
+    examineArguments(D, Exp, Exp->arg_begin(), Exp->arg_end());
+  }
+  if (shouldExamineCall(D, nullptr))
+    handleCall(Exp, D);
 }
 
 void BuildLockset::VisitDeclStmt(const DeclStmt *S) {
@@ -2121,17 +2634,18 @@ void BuildLockset::VisitDeclStmt(const DeclStmt *S) {
       const Expr *E = VD->getInit();
       if (!E)
         continue;
-      E = E->IgnoreParens();
 
       // handle constructors that involve temporaries
-      if (auto *EWC = dyn_cast<ExprWithCleanups>(E))
-        E = EWC->getSubExpr()->IgnoreParens();
-      E = UnpackConstruction(E);
+      E = UnpackTemporaryConstruction(E);
 
       if (auto Object = Analyzer->ConstructedObjects.find(E);
           Object != Analyzer->ConstructedObjects.end()) {
         Object->second->setClangDecl(VD);
         Analyzer->ConstructedObjects.erase(Object);
+      }
+
+      if (const TrackingCapability *Cap = FindTrackingData(E)) {
+        AddTrackingData(VD, Cap, S);
       }
     }
   }
@@ -2147,6 +2661,164 @@ void BuildLockset::VisitMaterializeTemporaryExpr(
       Analyzer->ConstructedObjects.erase(Object);
     }
   }
+
+  auto *SubExpr = Exp->getSubExpr();
+  if (auto Cap = FindTrackingData(SubExpr)) {
+    AddTrackingData(Exp, Cap);
+  }
+}
+
+void BuildLockset::VisitCXXBindTemporaryExpr(const CXXBindTemporaryExpr *Exp) {
+  auto *SubExpr = Exp->getSubExpr();
+  if (auto Cap = FindTrackingData(SubExpr))
+    AddTrackingData(Exp, Cap);
+}
+
+void BuildLockset::VisitCXXNewExpr(const CXXNewExpr *Exp) {
+  auto *SubExpr = Exp->getConstructExpr();
+  if (auto Cap = FindTrackingData(SubExpr))
+    AddTrackingData(Exp, Cap);
+}
+
+TrackingCapability *
+BuildLockset::FindRequiresCapabilityFromDecl(const ValueDecl *Decl,
+                                             const Expr *Exp) {
+  llvm::SmallVector<AnyRequiresAttr, 4> RequireAttrs;
+
+  if (const auto *MethodD = dyn_cast<CXXMethodDecl>(Decl))
+    if (auto I = Analyzer->GlobalDynamicRequires->find(MethodD);
+        I != Analyzer->GlobalDynamicRequires->end()) {
+      RequireAttrs.emplace_back(I->getSecond().get());
+    }
+
+  if (Decl->hasAttr<RequiresCapabilityAttr>())
+    for (auto *A : Decl->attrs()) {
+      if (A->getKind() == attr::RequiresCapability) {
+        RequireAttrs.emplace_back(cast<RequiresCapabilityAttr>(A));
+        break;
+      }
+    }
+
+  if (RequireAttrs.empty()) {
+    return nullptr;
+  }
+
+  return new (Analyzer->TrackingDataArena)
+      TrackingCapability(std::move(RequireAttrs), Decl, Exp->getSourceRange());
+}
+
+CapExprSet BuildLockset::TranslateRequiresAttr(
+    AnyRequiresAttr AnyAttr, const ValueDecl *AttachedDecl, const Expr *Exp,
+    DynamicRequiresAttrInfo **FromDynamicAttr) {
+  CapExprSet Caps;
+
+  auto [CapExprs, DynAttr] = AnyAttr.Unpack();
+  if (FromDynamicAttr)
+    *FromDynamicAttr = DynAttr;
+
+  for (auto *CapExpr : CapExprs) {
+    CapabilityExpr Cap = Analyzer->SxBuilder.translateAttrExpr(
+        CapExpr, AttachedDecl, Exp, nullptr);
+    if (Cap.isInvalid()) {
+      warnInvalidLock(Analyzer->Handler, CapExpr, AttachedDecl, Exp,
+                      Cap.getKind());
+    } else if (!Cap.shouldIgnore())
+      Caps.push_back(std::move(Cap));
+  }
+
+  return Caps;
+}
+
+bool BuildLockset::GetOutputInfoForFirstAttr(
+    const TrackingCapability &TrackingCap, const Expr *Exp,
+    std::string &CapName, StringRef &CapKind,
+    DynamicRequiresAttrInfo *&FromDynamicAttr) {
+  AnyRequiresAttr AnyAttr = TrackingCap.RequireAttrs.front();
+
+  DynamicRequiresAttrInfo *FromDynamicAttrTmp = nullptr;
+  auto Capabilities = TranslateRequiresAttr(AnyAttr, TrackingCap.AttachedDecl,
+                                            Exp, &FromDynamicAttrTmp);
+  if (Capabilities.empty()) {
+    return false;
+  } else {
+    CapName = Capabilities.front().toString();
+    CapKind = Capabilities.front().getKind();
+    FromDynamicAttr = FromDynamicAttrTmp;
+    return true;
+  }
+}
+
+void BuildLockset::warnIfAccessableOutOfScope(const Expr *LHS,
+                                              const TrackingCapability *Cap,
+                                              const Expr *Exp) {
+  if (auto *ME = dyn_cast<MemberExpr>(LHS)) {
+    StringRef CapKind;
+    std::string CapName;
+    DynamicRequiresAttrInfo *FromDynamicRequires = nullptr;
+    if (GetOutputInfoForFirstAttr(*Cap, nullptr, CapName, CapKind,
+                                  FromDynamicRequires)) {
+      Analyzer->Handler.handleFunctionalObjectLosesRequiresAttr(
+          CapKind, CapName, VLAK_ByAssigningToField, LHS->getSourceRange(),
+          Cap->OriginRange, FromDynamicRequires);
+    }
+  } else if (auto *DRE = dyn_cast<DeclRefExpr>(LHS)) {
+    AddTrackingData(DRE->getDecl(), Cap, DRE);
+  } else {
+    Analyzer->Handler.handleTrackingValuesModelFailure(
+        Exp, "too complex LHS expression for scope detection",
+        LHS->getExprLoc());
+  }
+}
+
+void BuildLockset::VisitDeclRefExpr(const DeclRefExpr *DRE) {
+  const ValueDecl *Decl = DRE->getDecl();
+  const TrackingCapability *Cap = FindTrackingData(Decl);
+  if (!Cap) {
+    Cap = FindRequiresCapabilityFromDecl(Decl, DRE);
+  }
+
+  if (Cap) {
+    AddTrackingData(TrackingPtr(DRE), Cap);
+  }
+}
+
+void BuildLockset::VisitLambdaExpr(const LambdaExpr *LE) {
+  auto *Func = LE->getCallOperator();
+  const TrackingCapability *Cap = FindRequiresCapabilityFromDecl(Func, LE);
+  if (Cap) {
+    AddTrackingData(TrackingPtr(LE), Cap);
+  }
+}
+
+void BuildLockset::VisitMemberExpr(const MemberExpr *Exp) {
+  auto *Base = Exp->getBase();
+  auto *Member = Exp->getMemberDecl();
+
+  const TrackingCapability *CapBase = FindTrackingData(Base);
+  const TrackingCapability *CapMember = FindTrackingData(Member);
+  if (!CapMember) {
+    CapMember = FindRequiresCapabilityFromDecl(Member, Exp);
+  }
+
+  if (CapBase && CapMember) {
+    Analyzer->Handler.handleTrackingValuesModelFailure(
+        Exp, "double capability flow", Exp->getBeginLoc());
+    return;
+  }
+
+  const TrackingCapability *Cap = CapBase ? CapBase : CapMember;
+  if (Cap) {
+    AddTrackingData(TrackingPtr(Exp), Cap);
+  }
+}
+
+void BuildLockset::VisitStmt(const Stmt *S) {
+  for (const Stmt *ChildStmt : S->children()) {
+    if (Analyzer->TrackingData.contains(ChildStmt)) {
+      Analyzer->Handler.handleTrackingValuesModelFailure(
+          S, "unsupported for tracking", S->getBeginLoc());
+    }
+  }
 }
 
 void BuildLockset::VisitReturnStmt(const ReturnStmt *S) {
@@ -2155,6 +2827,18 @@ void BuildLockset::VisitReturnStmt(const ReturnStmt *S) {
   const Expr *RetVal = S->getRetValue();
   if (!RetVal)
     return;
+
+  if (const TrackingCapability *Cap = FindTrackingData(RetVal)) {
+    StringRef CapKind;
+    std::string CapName;
+    DynamicRequiresAttrInfo *FromDynamicRequires = nullptr;
+    if (GetOutputInfoForFirstAttr(*Cap, nullptr, CapName, CapKind,
+                                  FromDynamicRequires)) {
+      Analyzer->Handler.handleFunctionalObjectLosesRequiresAttr(
+          CapKind, CapName, clang::threadSafety::VLAK_ByReturning,
+          S->getSourceRange(), Cap->OriginRange, FromDynamicRequires);
+    }
+  }
 
   // If returning by reference, check that the function requires the appropriate
   // capabilities.
@@ -2260,6 +2944,30 @@ static bool neverReturns(const CFGBlock *B) {
   return false;
 }
 
+/// Enable dynamic attributes only for lambdas defined in functions with enabled
+/// thread safety analysis.
+static bool supportsDynamicRequiresAttribute(const FunctionDecl *Func) {
+  if (!Func || Func->hasAttr<RequiresCapabilityAttr>())
+    return false;
+
+  if (!isa<CXXMethodDecl>(Func))
+    return false;
+
+  auto *RecordDecl = dyn_cast<CXXRecordDecl>(Func->getParent());
+
+  if (!RecordDecl || !RecordDecl->isLambda())
+    return false;
+
+  auto *ParentDecl =
+      dyn_cast_or_null<FunctionDecl>(RecordDecl->getParentFunctionOrMethod());
+  if (!ParentDecl)
+    return false;
+
+  return !ParentDecl->hasAttr<NoThreadSafetyAnalysisAttr>() &&
+         !isa<CXXConstructorDecl>(ParentDecl) &&
+         !isa<CXXDestructorDecl>(ParentDecl);
+}
+
 /// Check a function's CFG for thread-safety violations.
 ///
 /// We traverse the blocks in the CFG, compute the set of mutexes that are held
@@ -2272,15 +2980,13 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
   if (!walker.init(AC))
     return;
 
-  // AC.dumpCFG(true);
-  // threadSafety::printSCFG(walker);
-
   CFG *CFGraph = walker.getGraph();
   const NamedDecl *D = walker.getDecl();
   CurrentFunction = dyn_cast<FunctionDecl>(D);
 
   if (D->hasAttr<NoThreadSafetyAnalysisAttr>())
     return;
+  TrackingCapabilitiesAllowed = !D->hasAttr<NoTrackingCapabilityAttr>();
 
   // FIXME: Do something a bit more intelligent inside constructor and
   // destructor code.  Constructors and destructors must assume unique access
@@ -2313,6 +3019,18 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
 
   // Fill in source locations for all CFGBlocks.
   findBlockLocations(CFGraph, SortedGraph, BlockInfo);
+
+#ifdef PRINT_DEBUG_LOGS
+  llvm::errs() << "====== ";
+  D->printQualifiedName(llvm::errs());
+  // llvm::errs() << "\n";
+  // AC.dumpCFG(true);
+  // llvm::errs() << "\n";
+  // threadSafety::printSCFG(walker);
+  // llvm::errs() << "\n";
+  // LocalVarMap.dump();
+  llvm::errs() << "\n======\n";
+#endif
 
   CapExprSet ExclusiveLocksAcquired;
   CapExprSet SharedLocksAcquired;
@@ -2371,6 +3089,19 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
                                                        FactEntry::Declared);
       addLock(InitialLockset, std::move(Entry), true);
     }
+
+    auto *CurrentMethod = dyn_cast_or_null<CXXMethodDecl>(D);
+    if (CurrentMethod && CurrentMethod->isVirtual() &&
+        !InitialLockset.isEmpty()) {
+      for (const auto *BaseMethod : CurrentMethod->overridden_methods()) {
+        if (!BaseMethod->hasAttr<RequiresCapabilityAttr>()) {
+          // Our InitialLockset has some locks, but this BaseMethod has no
+          // requires attrs
+          auto LockName = FactMan[*InitialLockset.begin()].toString();
+          Handler.handleOverridenFuncRequiresLock(CurrentMethod, LockName, Loc);
+        }
+      }
+    }
   }
 
   // Compute the expected exit set.
@@ -2391,6 +3122,13 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
         std::make_unique<LockableFactEntry>(Lock, LK_Shared, D->getLocation()));
   for (const auto &Lock : LocksReleased)
     ExpectedFunctionExitSet.removeLock(FactMan, Lock);
+
+  // For some functions we turn on dynamic requires attributes. These functions
+  // must be defined in the same compiling file and must not escape it.
+  // For now, it is only allowed for lambda expressions, defined inside another
+  // function.
+  DynamicRequiresAllowed = Handler.issueSTEWarnings() &&
+                           supportsDynamicRequiresAttribute(CurrentFunction);
 
   for (const auto *CurrBlock : *SortedGraph) {
     unsigned CurrBlockID = CurrBlock->getBlockID();
@@ -2458,7 +3196,10 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
       switch (BI.getKind()) {
         case CFGElement::Statement: {
           CFGStmt CS = BI.castAs<CFGStmt>();
+
+          // Build the lockset
           LocksetBuilder.Visit(CS.getStmt());
+
           break;
         }
         // Ignore BaseDtor and MemberDtor for now.
@@ -2541,14 +3282,36 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
 /// Each block in the CFG is traversed exactly once.
 void threadSafety::runThreadSafetyAnalysis(AnalysisDeclContext &AC,
                                            ThreadSafetyHandler &Handler,
-                                           BeforeSet **BSet) {
-  if (!*BSet)
-    *BSet = new BeforeSet;
-  ThreadSafetyAnalyzer Analyzer(Handler, *BSet);
+                                           AnalysisCache **Cache) {
+  if (!*Cache)
+    *Cache = new AnalysisCache;
+  ThreadSafetyAnalyzer Analyzer(Handler, *Cache);
   Analyzer.runAnalysis(AC);
 }
 
-void threadSafety::threadSafetyCleanup(BeforeSet *Cache) { delete Cache; }
+void threadSafety::threadSafetyCleanup(AnalysisCache *Cache) { delete Cache; }
+
+void threadSafety::threadSafetyRegisterCapabilityHolder(
+    AnalysisCache **Cache, DetachedCapabilityHolderAttr *Attr) {
+#ifdef PRINT_DEBUG_LOGS
+  llvm::errs() << "CapabilityHolder: " << Attr->getArg() << '\n';
+#endif
+
+  if (!*Cache)
+    *Cache = new AnalysisCache;
+  (*Cache)->CapabilityHolders.push_back(Attr->getArg());
+}
+
+void threadSafety::threadSafetyRegisterExecuteWithCapability(
+    AnalysisCache **Cache, DetachedExecuteWithCapabilityAttr *Attr) {
+#ifdef PRINT_DEBUG_LOGS
+  llvm::errs() << "ExecuteWithCapability: " << Attr->getDeclType() << '\n';
+#endif
+
+  if (!*Cache)
+    *Cache = new AnalysisCache;
+  (*Cache)->ExecuteWithCapabilityAttrs.push_back(Attr);
+}
 
 /// Helper function that returns a LockKind required for the given level
 /// of access.

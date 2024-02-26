@@ -3915,6 +3915,9 @@ def warn_acquired_before : Warning<
 def warn_acquired_before_after_cycle : Warning<
   "Cycle in acquired_before/after dependencies, starting with '%0'">,
   InGroup<ThreadSafetyAnalysis>, DefaultIgnore;
+def warn_overriden_fun_requires_lock : Warning<
+  "virtual function requires lock '%0', but its base method does not">,
+  InGroup<ThreadSafetyAnalysis>, DefaultIgnore;
 
 
 // Thread safety warnings negative capabilities
@@ -3968,15 +3971,47 @@ def warn_fun_requires_lock_precise :
   InGroup<ThreadSafetyPrecise>, DefaultIgnore;
 def note_found_mutex_near_match : Note<"found near match '%0'">;
 
+// Thread safety warnings related to 'thread' capability
+def warn_thread_safety_ste : Warning<"thread safety STE warning">,
+  InGroup<ThreadSafetySTE>, DefaultIgnore;
+def warn_exec_with_capability_unsatisfied :
+  Warning<"argument of %0 requires '%1' capability">,
+  InGroup<ThreadSafetySTE>, DefaultIgnore;
+def note_acquired_capabilities :
+  Note<"acquired capabilities: %0">;
+def note_first_thread_capability_acquired :
+  Note<"the first thread capability was '%0'">;
+
+// Thread safety warnings related to values tracking
+def warn_tracking_functional_object_going_out_of_scope :
+  Warning<"functional object requiring %0 '%1' loses its annotation"
+  "%select{| by returning from function| by passing as argument to function call| by assigning to field}2">,
+  InGroup<ThreadSafetySTE>, DefaultIgnore;
+def note_capability_traced_from_here :
+  Note<"capability '%0' is traced from here">;
+def note_dynamic_requires_attr :
+  Note<"lambda implicitly requires thread '%0' for this statement">;
+
 // Verbose thread safety warnings
 def warn_thread_safety_verbose : Warning<"thread safety verbose warning">,
   InGroup<ThreadSafetyVerbose>, DefaultIgnore;
 def note_thread_warning_in_fun : Note<"thread warning in function %0">;
 def note_guarded_by_declared_here : Note<"guarded_by declared here">;
+def remark_dynamic_requires_attr_emitted :
+  Remark<"dynamic thread capability '%0'">,
+  InGroup<ThreadSafetyVerbose>, DefaultIgnore;
 
 // Dummy warning that will trigger "beta" warnings from the analysis if enabled.
 def warn_thread_safety_beta : Warning<"thread safety beta warning">,
   InGroup<ThreadSafetyBeta>, DefaultIgnore;
+
+def warn_thread_safety_tracking_model_failure :
+  Warning<"statement %0 does not fit into tracking values model (%1)">,
+  InGroup<ThreadSafetySTEModelFailure>, DefaultIgnore;
+def warn_assumed_called_in_acquired_thread :
+  Warning<"assume safe passing functional object with capability '%0' "
+  "%select{because it was acquired|as it was dynamically required}1">,
+  InGroup<ThreadSafetySTEModelFailure>, DefaultIgnore;
 
 // Consumed warnings
 def warn_use_in_invalid_state : Warning<

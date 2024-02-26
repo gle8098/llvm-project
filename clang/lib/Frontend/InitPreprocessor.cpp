@@ -781,9 +781,9 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   Builder.defineMacro("__clang_patchlevel__", TOSTR(CLANG_VERSION_PATCHLEVEL));
 #undef TOSTR
 #undef TOSTR2
-  Builder.defineMacro("__clang_version__",
-                      "\"" CLANG_VERSION_STRING " "
-                      + getClangFullRepositoryVersion() + "\"");
+  Builder.defineMacro("__clang_version__", "\"" CLANG_VERSION_STRING " " +
+                                               getClangFullRepositoryVersion() +
+                                               "\"");
 
   if (LangOpts.GNUCVersion != 0) {
     // Major, minor, patch, are given two decimal places each, so 4.2.1 becomes

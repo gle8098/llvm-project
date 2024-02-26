@@ -233,9 +233,11 @@ namespace sema {
 }
 
 namespace threadSafety {
-  class BeforeSet;
-  void threadSafetyCleanup(BeforeSet* Cache);
-}
+  class AnalysisCache;
+  void threadSafetyCleanup(AnalysisCache* Cache);
+  void threadSafetyRegisterCapabilityHolder(AnalysisCache** Cache, DetachedCapabilityHolderAttr* Attr);
+  void threadSafetyRegisterExecuteWithCapability(AnalysisCache** Cache, DetachedExecuteWithCapabilityAttr* Attr);  
+} // namespace threadSafety
 
 // FIXME: No way to easily map from TemplateTypeParmTypes to
 // TemplateTypeParmDecls, so we have this horrible PointerUnion.
@@ -10106,7 +10108,7 @@ public:
 
   /// Worker object for performing CFG-based warnings.
   sema::AnalysisBasedWarnings AnalysisWarnings;
-  threadSafety::BeforeSet *ThreadSafetyDeclCache;
+  threadSafety::AnalysisCache *ThreadSafetyDeclCache;
 
   /// An entity for which implicit template instantiation is required.
   ///

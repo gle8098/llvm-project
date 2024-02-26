@@ -411,6 +411,12 @@ static Attr *handleMSConstexprAttr(Sema &S, Stmt *St, const ParsedAttr &A,
   return ::new (S.Context) MSConstexprAttr(S.Context, A);
 }
 
+static Attr *handleNoTrackingCapability(Sema &S, Stmt *St, const ParsedAttr &A,
+                                        SourceRange Range) {
+
+  return ::new (S.Context) NoTrackingCapabilityAttr(S.Context, A);
+}
+
 #define WANT_STMT_MERGE_LOGIC
 #include "clang/Sema/AttrParsedAttrImpl.inc"
 #undef WANT_STMT_MERGE_LOGIC
@@ -616,6 +622,8 @@ static Attr *ProcessStmtAttribute(Sema &S, Stmt *St, const ParsedAttr &A,
     return handleCodeAlignAttr(S, St, A);
   case ParsedAttr::AT_MSConstexpr:
     return handleMSConstexprAttr(S, St, A, Range);
+  case ParsedAttr::AT_NoTrackingCapability:
+    return handleNoTrackingCapability(S, St, A, Range);
   default:
     // N.B., ClangAttrEmitter.cpp emits a diagnostic helper that ensures a
     // declaration attribute is not written on a statement, but this code is

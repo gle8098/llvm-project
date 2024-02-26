@@ -1076,11 +1076,14 @@ def ThreadSafetyReferenceReturn  : DiagGroup<"thread-safety-reference-return">;
 def ThreadSafetyReference  : DiagGroup<"thread-safety-reference",
                                              [ThreadSafetyReferenceReturn]>;
 def ThreadSafetyNegative   : DiagGroup<"thread-safety-negative">;
+def ThreadSafetySTE        : DiagGroup<"thread-safety-ste">;
+def ThreadSafetySTEModelFailure : DiagGroup<"thread-safety-ste-model-failure">;
 def ThreadSafety : DiagGroup<"thread-safety",
                              [ThreadSafetyAttributes,
                               ThreadSafetyAnalysis,
                               ThreadSafetyPrecise,
-                              ThreadSafetyReference]>;
+                              ThreadSafetyReference,
+                              ThreadSafetySTE]>;
 def ThreadSafetyVerbose : DiagGroup<"thread-safety-verbose">;
 def ThreadSafetyBeta : DiagGroup<"thread-safety-beta">;
 
