@@ -4199,3 +4199,31 @@ def AvailableOnlyInDefaultEvalMethod : InheritableAttr {
   let Documentation = [Undocumented];
 }
 
+def STEExec : InheritableAttr {
+  let Spellings = [GNU<"ste_exec">];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
+def OneThreadAccess : InheritableParamAttr {
+  let Spellings = [GNU<"one_thread_access">];
+  let Subjects = SubjectList<[Field], ErrorDiag>;
+  let Args = [ExprArgument<"Arg">];
+  let LateParsed = 1;
+  let TemplateDependent = 1;
+  let ParseArgumentsAsUnevaluated = 1;
+  let InheritEvenIfAlreadyPresent = 1;
+  let Documentation = [Undocumented];
+}
+
+def OneThreadExecutable : InheritableParamAttr {
+  let Spellings = [GNU<"one_thread_executable">];
+  let Args = [ExprArgument<"Arg">];
+  let LateParsed = 1;
+  let TemplateDependent = 1;
+  let ParseArgumentsAsUnevaluated = 1;
+  let InheritEvenIfAlreadyPresent = 1;
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [Undocumented];
+}

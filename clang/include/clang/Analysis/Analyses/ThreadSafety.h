@@ -18,8 +18,8 @@
 #ifndef LLVM_CLANG_ANALYSIS_ANALYSES_THREADSAFETY_H
 #define LLVM_CLANG_ANALYSIS_ANALYSES_THREADSAFETY_H
 
+#include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/SourceLocation.h"
-#include "llvm/ADT/StringRef.h"
 
 namespace clang {
 
@@ -29,7 +29,7 @@ class NamedDecl;
 
 namespace threadSafety {
 
-class BeforeSet;
+class AnalysisCache;
 
 /// This enum distinguishes between different kinds of operations that may
 /// need to be protected by locks. We use this enum in error handling.
@@ -96,6 +96,9 @@ public:
 
   ThreadSafetyHandler() = default;
   virtual ~ThreadSafetyHandler();
+
+  // fixme: remove method
+  virtual DiagnosticsEngine *getDiagnosticsEngine() { return nullptr; };
 
   /// Warn about lock expressions which fail to resolve to lockable objects.
   /// \param Loc -- the SourceLocation of the unresolved expression.
@@ -245,9 +248,9 @@ private:
 /// Each block in the CFG is traversed exactly once.
 void runThreadSafetyAnalysis(AnalysisDeclContext &AC,
                              ThreadSafetyHandler &Handler,
-                             BeforeSet **Bset);
+                             AnalysisCache **Bset);
 
-void threadSafetyCleanup(BeforeSet *Cache);
+void threadSafetyCleanup(AnalysisCache *Cache);
 
 /// Helper function that returns a LockKind required for the given level
 /// of access.

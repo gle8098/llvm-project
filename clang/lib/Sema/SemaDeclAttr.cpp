@@ -8672,6 +8672,24 @@ EnforceTCBLeafAttr *Sema::mergeEnforceTCBLeafAttr(
       *this, D, AL);
 }
 
+static bool handleOneThreadAccessAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (AL.getNumArgs() != 1)
+    return false;
+
+  Expr *ArgExp = AL.getArgAsExpr(0);
+  D->addAttr(::new (S.Context) OneThreadAccessAttr(S.Context, AL, ArgExp));
+  return true;
+}
+
+static bool handleOneThreadExecutableAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (AL.getNumArgs() != 1)
+    return false;
+
+  Expr *ArgExp = AL.getArgAsExpr(0);
+  D->addAttr(::new (S.Context) OneThreadExecutableAttr(S.Context, AL, ArgExp));
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // Top Level Sema Entry Points
 //===----------------------------------------------------------------------===//
@@ -9492,6 +9510,18 @@ ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D, const ParsedAttr &AL,
 
   case ParsedAttr::AT_UsingIfExists:
     handleSimpleAttribute<UsingIfExistsAttr>(S, D, AL);
+    break;
+
+  case ParsedAttr::AT_STEExec:
+    handleSimpleAttribute<STEExecAttr>(S, D, AL);
+    break;
+
+  case ParsedAttr::AT_OneThreadAccess:
+    handleOneThreadAccessAttr(S, D, AL);
+    break;
+
+  case ParsedAttr::AT_OneThreadExecutable:
+    handleOneThreadExecutableAttr(S, D, AL);
     break;
   }
 }

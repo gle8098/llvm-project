@@ -232,8 +232,8 @@ namespace sema {
 }
 
 namespace threadSafety {
-  class BeforeSet;
-  void threadSafetyCleanup(BeforeSet* Cache);
+  class AnalysisCache;
+  void threadSafetyCleanup(AnalysisCache* Cache);
 }
 
 // FIXME: No way to easily map from TemplateTypeParmTypes to
@@ -9927,7 +9927,7 @@ public:
 
   /// Worker object for performing CFG-based warnings.
   sema::AnalysisBasedWarnings AnalysisWarnings;
-  threadSafety::BeforeSet *ThreadSafetyDeclCache;
+  threadSafety::AnalysisCache *ThreadSafetyDeclCache;
 
   /// An entity for which implicit template instantiation is required.
   ///
