@@ -3852,6 +3852,31 @@ def warn_fun_requires_lock_precise :
   InGroup<ThreadSafetyPrecise>, DefaultIgnore;
 def note_found_mutex_near_match : Note<"found near match '%0'">;
 
+// Thread safety warnings related to 'thread' capability
+def warn_thread_safety_ste : Warning<"thread safety STE warning">,
+  InGroup<ThreadSafetySTE>, DefaultIgnore;
+def warn_capability_leaks_to_unsafe_call :
+  Warning<"values with capability '%0' are leaked to unsafe "
+  "%select{call|object constructor}2 '%1'">,
+  InGroup<ThreadSafetySTE>, DefaultIgnore;
+def warn_capability_leaks_to_unsafe_stmt :
+  Warning<"values with capability '%0' are leaked to unsafe %1">,
+  InGroup<ThreadSafetySTE>, DefaultIgnore;
+def note_capability_trace_from_here : Note<"capability is traced from here">;
+def warn_exec_with_mismatched_capability :
+  Warning<"calling %0 acquires '%1' capability, but argument is "
+  "associated with '%2' capability">,
+  InGroup<ThreadSafetySTE>, DefaultIgnore;
+def warn_second_thread_capability_acquired :
+  Warning<"attempt to take the second thread capability '%0'">,
+  InGroup<ThreadSafetySTE>, DefaultIgnore;
+def note_first_thread_capability_acquired :
+  Note<"the first thread capability was '%0'">;
+def note_dynamic_requires_attr :
+  Note<"dynamically added thread capability '%0' to this lambda expression">;
+def note_dynamic_requires_attr_origin :
+  Note<"thread capability was added because this statement required it">;
+
 // Verbose thread safety warnings
 def warn_thread_safety_verbose : Warning<"thread safety verbose warning">,
   InGroup<ThreadSafetyVerbose>, DefaultIgnore;

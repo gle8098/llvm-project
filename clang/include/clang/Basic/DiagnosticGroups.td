@@ -1058,6 +1058,7 @@ def ThreadSafety : DiagGroup<"thread-safety",
                               ThreadSafetyReference]>;
 def ThreadSafetyVerbose : DiagGroup<"thread-safety-verbose">;
 def ThreadSafetyBeta : DiagGroup<"thread-safety-beta">;
+def ThreadSafetySTE : DiagGroup<"thread-safety-ste">;
 
 // Uniqueness Analysis warnings
 def Consumed       : DiagGroup<"consumed">;

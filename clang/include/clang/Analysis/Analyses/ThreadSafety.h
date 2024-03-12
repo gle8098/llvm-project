@@ -26,6 +26,8 @@ namespace clang {
 class AnalysisDeclContext;
 class FunctionDecl;
 class NamedDecl;
+class CXXMethodDecl;
+class Stmt;
 
 namespace threadSafety {
 
@@ -87,6 +89,21 @@ enum LockErrorKind {
   LEK_LockedSomePredecessors,
   LEK_LockedAtEndOfFunction,
   LEK_NotLockedAtEndOfFunction
+};
+
+// todo: description
+struct DynamicRequiresAttrInfo {
+  /// Name of lock
+  std::string CapabilityName;
+
+  /// Begin location of the subject
+  SourceLocation LambdaLoc;
+
+  /// First found usage of CapExpr capability inside lambda
+  SourceRange CapUsageLoc;
+
+  DynamicRequiresAttrInfo(std::string CapabilityName, SourceLocation LambdaLoc,
+                          SourceRange CapUsageLoc);
 };
 
 /// Handler class for thread safety warnings.
@@ -227,6 +244,27 @@ public:
   /// Warn that there is a cycle in acquired_before/after dependencies.
   virtual void handleBeforeAfterCycle(Name L1Name, SourceLocation Loc) {}
 
+  // todo: descriptions
+
+  virtual void handleCapLeaksToUnsafeCall(
+      const NamedDecl *CalleeDecl, Name LockName, bool isConstructor,
+      SourceRange CallLoc, SourceRange OriginLoc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
+
+  virtual void handleCapLeaksToUnsafeStmt(
+      const Stmt *S, Name LockName, SourceRange OriginLoc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
+
+  virtual void handleExecWithMismatchedCap(const CXXMethodDecl *ExecMethodDecl,
+                                           Name AcquiringLockName,
+                                           Name TracedLockName,
+                                           SourceLocation Loc) {}
+
+  virtual void handleDoubleThreadCapability(SourceLocation FirstLoc,
+                                            Name FirstLockName,
+                                            SourceLocation SecondLoc,
+                                            Name SecondLockName) {}
+
   /// Called by the analysis when starting analysis of a function.
   /// Used to issue suggestions for changes to annotations.
   virtual void enterFunction(const FunctionDecl *FD) {}
@@ -237,8 +275,12 @@ public:
   bool issueBetaWarnings() { return IssueBetaWarnings; }
   void setIssueBetaWarnings(bool b) { IssueBetaWarnings = b; }
 
+  bool issueSTEWarnings() { return IssueSTEWarnings; }
+  void setIssueSTEWarnings(bool b) { IssueSTEWarnings = b; }
+
 private:
   bool IssueBetaWarnings = false;
+  bool IssueSTEWarnings = false;
 };
 
 /// Check a function's CFG for thread-safety violations.

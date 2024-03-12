@@ -1800,12 +1800,7 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
 
   OptionalNotes getNotes(const PartialDiagnosticAt &Note) const {
     OptionalNotes ONS(1, Note);
-    if (Verbose && CurrentFunction) {
-      PartialDiagnosticAt FNote(CurrentFunction->getBody()->getBeginLoc(),
-                                S.PDiag(diag::note_thread_warning_in_fun)
-                                    << CurrentFunction);
-      ONS.push_back(std::move(FNote));
-    }
+    pushVerboseNote(ONS);
     return ONS;
   }
 
@@ -1814,13 +1809,32 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     OptionalNotes ONS;
     ONS.push_back(Note1);
     ONS.push_back(Note2);
+    pushVerboseNote(ONS);
+    return ONS;
+  }
+
+  void pushVerboseNote(OptionalNotes &ONS) const {
     if (Verbose && CurrentFunction) {
       PartialDiagnosticAt FNote(CurrentFunction->getBody()->getBeginLoc(),
                                 S.PDiag(diag::note_thread_warning_in_fun)
                                     << CurrentFunction);
       ONS.push_back(std::move(FNote));
     }
-    return ONS;
+  }
+
+  void pushDynamicAttrNotes(
+      OptionalNotes &ONS,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) const {
+    if (!DynamicRequiresAttr)
+      return;
+
+    ONS.push_back(
+        PartialDiagnosticAt(DynamicRequiresAttr->LambdaLoc,
+                            S.PDiag(diag::note_dynamic_requires_attr)
+                                << DynamicRequiresAttr->CapabilityName));
+    ONS.push_back(
+        PartialDiagnosticAt(DynamicRequiresAttr->CapUsageLoc.getBegin(),
+                            S.PDiag(diag::note_dynamic_requires_attr_origin)));
   }
 
   OptionalNotes makeLockedHereNote(SourceLocation LocLocked, StringRef Kind) {
@@ -2050,6 +2064,70 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     PartialDiagnosticAt Warning(Loc,
       S.PDiag(diag::warn_acquired_before_after_cycle) << L1Name);
     Warnings.emplace_back(std::move(Warning), getNotes());
+  }
+
+  void handleCapLeaksToUnsafeCall(
+      const NamedDecl *CalleeDecl, Name LockName, bool isConstructor,
+      SourceRange CallLoc, SourceRange OriginLoc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
+    PartialDiagnosticAt Warning(
+        CallLoc.getBegin(), S.PDiag(diag::warn_capability_leaks_to_unsafe_call)
+                                << LockName
+                                << CalleeDecl->getQualifiedNameAsString()
+                                << static_cast<int>(isConstructor));
+
+    OptionalNotes Notes;
+
+    if (!CallLoc.fullyContains(OriginLoc)) {
+      Notes.push_back(
+          PartialDiagnosticAt(OriginLoc.getBegin(),
+                              S.PDiag(diag::note_capability_trace_from_here)));
+    }
+
+    pushDynamicAttrNotes(Notes, DynamicRequiresAttr);
+    pushVerboseNote(Notes);
+    Warnings.emplace_back(std::move(Warning), std::move(Notes));
+  }
+
+  void handleCapLeaksToUnsafeStmt(
+      const Stmt *Stmt, Name LockName, SourceRange OriginLoc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
+    PartialDiagnosticAt Warning(
+        Stmt->getBeginLoc(), S.PDiag(diag::warn_capability_leaks_to_unsafe_stmt)
+                                 << LockName << Stmt->getStmtClassName());
+
+    OptionalNotes Notes;
+
+    if (!Stmt->getSourceRange().fullyContains(OriginLoc)) {
+      Notes.push_back(
+          PartialDiagnosticAt(OriginLoc.getBegin(),
+                              S.PDiag(diag::note_capability_trace_from_here)));
+    }
+
+    pushDynamicAttrNotes(Notes, DynamicRequiresAttr);
+    pushVerboseNote(Notes);
+    Warnings.emplace_back(std::move(Warning), std::move(Notes));
+  }
+
+  void handleExecWithMismatchedCap(const CXXMethodDecl *ExecMethodDecl,
+                                   Name AcquiringLockName, Name TracedLockName,
+                                   SourceLocation Loc) override {
+    PartialDiagnosticAt Warning(
+        Loc, S.PDiag(diag::warn_exec_with_mismatched_capability)
+                 << ExecMethodDecl << AcquiringLockName << TracedLockName);
+    Warnings.emplace_back(std::move(Warning), getNotes());
+  }
+
+  void handleDoubleThreadCapability(SourceLocation FirstLoc, Name FirstLockName,
+                                    SourceLocation SecondLoc,
+                                    Name SecondLockName) override {
+    PartialDiagnosticAt Warning(
+        SecondLoc, S.PDiag(diag::warn_second_thread_capability_acquired)
+                       << SecondLockName);
+    PartialDiagnosticAt Note(
+        FirstLoc, S.PDiag(diag::note_first_thread_capability_acquired)
+                      << FirstLockName);
+    Warnings.emplace_back(std::move(Warning), getNotes(std::move(Note)));
   }
 
   void enterFunction(const FunctionDecl* FD) override {
@@ -2613,6 +2691,8 @@ void clang::sema::AnalysisBasedWarnings::IssueWarnings(
     threadSafety::ThreadSafetyReporter Reporter(S, FL, FEL);
     if (!Diags.isIgnored(diag::warn_thread_safety_beta, D->getBeginLoc()))
       Reporter.setIssueBetaWarnings(true);
+    if (!Diags.isIgnored(diag::warn_thread_safety_ste, D->getBeginLoc()))
+      Reporter.setIssueSTEWarnings(true);
     if (!Diags.isIgnored(diag::warn_thread_safety_verbose, D->getBeginLoc()))
       Reporter.setVerbose(true);
 
