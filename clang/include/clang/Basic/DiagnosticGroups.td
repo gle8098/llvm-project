@@ -1051,14 +1051,15 @@ def ThreadSafetyAnalysis   : DiagGroup<"thread-safety-analysis">;
 def ThreadSafetyPrecise    : DiagGroup<"thread-safety-precise">;
 def ThreadSafetyReference  : DiagGroup<"thread-safety-reference">;
 def ThreadSafetyNegative   : DiagGroup<"thread-safety-negative">;
+def ThreadSafetySTE        : DiagGroup<"thread-safety-ste">;
 def ThreadSafety : DiagGroup<"thread-safety",
                              [ThreadSafetyAttributes,
                               ThreadSafetyAnalysis,
                               ThreadSafetyPrecise,
-                              ThreadSafetyReference]>;
+                              ThreadSafetyReference,
+                              ThreadSafetySTE]>;
 def ThreadSafetyVerbose : DiagGroup<"thread-safety-verbose">;
 def ThreadSafetyBeta : DiagGroup<"thread-safety-beta">;
-def ThreadSafetySTE : DiagGroup<"thread-safety-ste">;
 
 // Uniqueness Analysis warnings
 def Consumed       : DiagGroup<"consumed">;
