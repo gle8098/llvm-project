@@ -1597,6 +1597,8 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
   unsigned CtxIndex;
 
   // helper functions
+  bool insertDynamicAttr(const CapabilityExpr &Cp, Expr *MutexExp,
+                         til::LiteralPtr *Self, SourceLocation Loc);
   void warnIfMutexNotHeld(const NamedDecl *D, const Expr *Exp, AccessKind AK,
                           Expr *MutexExp, ProtectedOperationKind POK,
                           til::LiteralPtr *Self, SourceLocation Loc);
@@ -1631,6 +1633,64 @@ public:
 };
 
 } // namespace
+
+bool BuildLockset::insertDynamicAttr(const CapabilityExpr &Cp, Expr *MutexExp,
+                                     til::LiteralPtr *Self,
+                                     SourceLocation Loc) {
+
+  if (Cp.getKind() != "thread" || !Analyzer->DynamicRequiresAllowed ||
+      Self /*Self will not outlive analysis of this function */) {
+    return false;
+  }
+
+  // Find for any other 'thread' capability taken. If we find one, then issue
+  // warning and return true, because there is no need for one more warning
+  // (mutex not held)
+
+  for (auto LockID : FSet) {
+    const auto &Lock = Analyzer->FactMan[LockID];
+    if (Lock.getKind() == "thread" && !Lock.equals(Cp)) {
+      Analyzer->Handler.handleDoubleThreadCapability(
+          Lock.loc(), Lock.toString(), Loc, Cp.toString());
+      return true;
+    }
+  }
+
+  if (!Analyzer->CurrentMethodDynamicRequiresAttr.shouldIgnore()) {
+    // Oops, we already have assertion
+    if (!Analyzer->CurrentMethodDynamicRequiresAttr.equals(Cp)) {
+      auto &PrevDynamicCap =
+          Analyzer->GlobalDynamicRequires->at(Analyzer->CurrentMethod);
+      Analyzer->Handler.handleDoubleThreadCapability(
+          PrevDynamicCap.Info.CapUsageLoc.getBegin(),
+          PrevDynamicCap.Info.CapabilityName, Loc, Cp.toString());
+      return true;
+    }
+  }
+
+  // Okey, add the dynamic requires attribute
+
+  assert(MutexExp);
+  DynamicRequiresAttr globalRequires(
+      MutexExp, Analyzer->CurrentMethod->getParent()->getLocation(), Loc,
+      Cp.toString());
+  Analyzer->GlobalDynamicRequires->insert(
+      {Analyzer->CurrentMethod, std::move(globalRequires)});
+
+  Analyzer->CurrentMethodDynamicRequiresAttr = Cp;
+
+  Analyzer->addLock(FSet, std::make_unique<LockableFactEntry>(
+                              Cp, LK_Exclusive, Loc, FactEntry::Asserted));
+
+  if (Analyzer->DiagVerbose(Loc)) {
+    Analyzer->Diag(Analyzer->CurrentMethod->getBeginLoc(),
+                   "dynamic thread capability '%0'",
+                   clang::DiagnosticIDs::Remark)
+        << Cp.toString();
+  }
+
+  return true;
+}
 
 /// Warn if the LSet does not contain a lock sufficient to protect access
 /// of at least the passed in AccessKind.
@@ -1685,42 +1745,7 @@ void BuildLockset::warnIfMutexNotHeld(const NamedDecl *D, const Expr *Exp,
                                            LK, Loc, &PartMatchName);
     } else {
       // There's no match at all.
-      if (Cp.getKind() == "thread" && Analyzer->DynamicRequiresAllowed &&
-          !Self /*Self will not outlive analysis of this function */) {
-        // todo: move to function
-
-        if (!Analyzer->CurrentMethodDynamicRequiresAttr.shouldIgnore()) {
-          // Oops, we already have assertion
-          if (!Analyzer->CurrentMethodDynamicRequiresAttr.equals(Cp)) {
-            auto &PrevDynamicCap =
-                Analyzer->GlobalDynamicRequires->at(Analyzer->CurrentMethod);
-            Analyzer->Handler.handleDoubleThreadCapability(
-                PrevDynamicCap.Info.CapUsageLoc.getBegin(),
-                PrevDynamicCap.Info.CapabilityName, Loc, Cp.toString());
-          }
-        } else {
-          assert(MutexExp);
-
-          DynamicRequiresAttr globalRequires(
-              MutexExp, Analyzer->CurrentMethod->getParent()->getLocation(),
-              Loc, Cp.toString());
-          Analyzer->GlobalDynamicRequires->insert(
-              {Analyzer->CurrentMethod, std::move(globalRequires)});
-
-          Analyzer->CurrentMethodDynamicRequiresAttr = Cp;
-
-          Analyzer->addLock(
-              FSet, std::make_unique<LockableFactEntry>(Cp, LK_Exclusive, Loc,
-                                                        FactEntry::Asserted));
-
-          if (Analyzer->DiagVerbose(Loc)) {
-            Analyzer->Diag(Analyzer->CurrentMethod->getBeginLoc(),
-                           "dynamic thread capability '%0'",
-                           clang::DiagnosticIDs::Remark)
-                << Cp.toString();
-          }
-        }
-      } else {
+      if (!insertDynamicAttr(Cp, MutexExp, Self, Loc)) {
         // Warn
         Analyzer->Handler.handleMutexNotHeld(Cp.getKind(), D, POK,
                                              Cp.toString(), LK, Loc);
@@ -2487,7 +2512,8 @@ void LocalVarFollower::VisitCallExpr(const CallExpr *CallExp,
       } else if (!Cp.equals(ThreadInfo->CapExpr)) {
         Analyzer->Handler.handleExecWithMismatchedCap(
             Decl, Cp.toString(), ThreadInfo->CapExpr.toString(),
-            CallExp->getBeginLoc());
+            CallExp->getBeginLoc(),
+            GetDynamicInfo(ThreadInfo->FromDynamicRequires));
         WarnProduced = true;
       }
     }
@@ -2514,18 +2540,18 @@ void LocalVarFollower::VisitCallExpr(const CallExpr *CallExp,
 
 void LocalVarFollower::VisitCXXConstructExpr(
     const CXXConstructExpr *ConstructExpr, StickyCapabilityWithLoc ThreadInfo) {
-  auto CtorName =
-      ConstructExpr->getConstructor()->getParent()->getQualifiedNameAsString();
+  const auto *Ctor = ConstructExpr->getConstructor();
+  auto CtorName = Ctor->getParent()->getQualifiedNameAsString();
 
-  if (CtorName != "std::function") {
-    Analyzer->Handler.handleCapLeaksToUnsafeCall(
-        ConstructExpr->getConstructor()->getParent(),
-        ThreadInfo->CapExpr.toString(), false, ConstructExpr->getSourceRange(),
-        ThreadInfo->OriginRange,
-        GetDynamicInfo(ThreadInfo->FromDynamicRequires));
-  } else {
+  if (CtorName == "std::function" || Ctor->isCopyOrMoveConstructor()) {
     AddTrackingStatement(ConstructExpr, ThreadInfo,
                          ConstructExpr->getBeginLoc());
+  } else {
+    Analyzer->Handler.handleCapLeaksToUnsafeCall(
+        ConstructExpr->getConstructor()->getParent(),
+        ThreadInfo->CapExpr.toString(), true, ConstructExpr->getSourceRange(),
+        ThreadInfo->OriginRange,
+        GetDynamicInfo(ThreadInfo->FromDynamicRequires));
   }
 }
 
@@ -2815,6 +2841,18 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
       auto Entry = std::make_unique<LockableFactEntry>(Mu, LK_Shared, Loc,
                                                        FactEntry::Declared);
       addLock(InitialLockset, std::move(Entry), true);
+    }
+
+    if (CurrentMethod && CurrentMethod->isVirtual() &&
+        !InitialLockset.isEmpty()) {
+      for (const auto *BaseMethod : CurrentMethod->overridden_methods()) {
+        if (!BaseMethod->hasAttr<RequiresCapabilityAttr>()) {
+          // Our InitialLockset has some locks, but this BaseMethod has no
+          // requires attrs
+          auto LockName = FactMan[*InitialLockset.begin()].toString();
+          Handler.handleOverridenFuncRequiresLock(CurrentMethod, LockName, Loc);
+        }
+      }
     }
   }
 

@@ -246,6 +246,10 @@ public:
 
   // todo: descriptions
 
+  virtual void handleOverridenFuncRequiresLock(const FunctionDecl *D,
+                                               Name LockName,
+                                               SourceLocation Loc) {}
+
   virtual void handleCapLeaksToUnsafeCall(
       const NamedDecl *CalleeDecl, Name LockName, bool isConstructor,
       SourceRange CallLoc, SourceRange OriginLoc,
@@ -255,10 +259,10 @@ public:
       const Stmt *S, Name LockName, SourceRange OriginLoc,
       const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
 
-  virtual void handleExecWithMismatchedCap(const CXXMethodDecl *ExecMethodDecl,
-                                           Name AcquiringLockName,
-                                           Name TracedLockName,
-                                           SourceLocation Loc) {}
+  virtual void handleExecWithMismatchedCap(
+      const CXXMethodDecl *ExecMethodDecl, Name AcquiringLockName,
+      Name TracedLockName, SourceLocation Loc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
 
   virtual void handleDoubleThreadCapability(SourceLocation FirstLoc,
                                             Name FirstLockName,

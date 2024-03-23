@@ -1832,6 +1832,7 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
         PartialDiagnosticAt(DynamicRequiresAttr->LambdaLoc,
                             S.PDiag(diag::note_dynamic_requires_attr)
                                 << DynamicRequiresAttr->CapabilityName));
+
     ONS.push_back(
         PartialDiagnosticAt(DynamicRequiresAttr->CapUsageLoc.getBegin(),
                             S.PDiag(diag::note_dynamic_requires_attr_origin)));
@@ -2066,6 +2067,13 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
+  void handleOverridenFuncRequiresLock(const FunctionDecl *D, Name LockName,
+                                       SourceLocation Loc) override {
+    PartialDiagnosticAt Warning(
+        Loc, S.PDiag(diag::warn_overriden_fun_requires_lock) << LockName);
+    Warnings.emplace_back(std::move(Warning), getNotes());
+  }
+
   void handleCapLeaksToUnsafeCall(
       const NamedDecl *CalleeDecl, Name LockName, bool isConstructor,
       SourceRange CallLoc, SourceRange OriginLoc,
@@ -2109,13 +2117,19 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     Warnings.emplace_back(std::move(Warning), std::move(Notes));
   }
 
-  void handleExecWithMismatchedCap(const CXXMethodDecl *ExecMethodDecl,
-                                   Name AcquiringLockName, Name TracedLockName,
-                                   SourceLocation Loc) override {
+  void handleExecWithMismatchedCap(
+      const CXXMethodDecl *ExecMethodDecl, Name AcquiringLockName,
+      Name TracedLockName, SourceLocation Loc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
     PartialDiagnosticAt Warning(
         Loc, S.PDiag(diag::warn_exec_with_mismatched_capability)
                  << ExecMethodDecl << AcquiringLockName << TracedLockName);
-    Warnings.emplace_back(std::move(Warning), getNotes());
+
+    OptionalNotes Notes;
+    pushDynamicAttrNotes(Notes, DynamicRequiresAttr);
+    pushVerboseNote(Notes);
+
+    Warnings.emplace_back(std::move(Warning), std::move(Notes));
   }
 
   void handleDoubleThreadCapability(SourceLocation FirstLoc, Name FirstLockName,

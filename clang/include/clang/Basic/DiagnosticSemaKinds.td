@@ -3807,6 +3807,9 @@ def warn_acquired_before : Warning<
 def warn_acquired_before_after_cycle : Warning<
   "Cycle in acquired_before/after dependencies, starting with '%0'">,
   InGroup<ThreadSafetyAnalysis>, DefaultIgnore;
+def warn_overriden_fun_requires_lock : Warning<
+  "virtual function requires lock '%0', but its base method does not">,
+  InGroup<ThreadSafetyAnalysis>, DefaultIgnore;
 
 
 // Thread safety warnings negative capabilities
@@ -3873,9 +3876,9 @@ def warn_second_thread_capability_acquired :
 def note_first_thread_capability_acquired :
   Note<"the first thread capability was '%0'">;
 def note_dynamic_requires_attr :
-  Note<"dynamically added thread capability '%0' to this lambda expression">;
+  Note<"lambda implicitly requires thread '%0'">;
 def note_dynamic_requires_attr_origin :
-  Note<"thread capability was added because this statement required it">;
+  Note<"... the thread was required for this statement">;
 
 // Verbose thread safety warnings
 def warn_thread_safety_verbose : Warning<"thread safety verbose warning">,
