@@ -2132,9 +2132,10 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     Warnings.emplace_back(std::move(Warning), std::move(Notes));
   }
 
-  void handleDoubleThreadCapability(SourceLocation FirstLoc, Name FirstLockName,
-                                    SourceLocation SecondLoc,
-                                    Name SecondLockName) override {
+  void handleDoubleThreadCapabilityHeld(SourceLocation FirstLoc,
+                                        Name FirstLockName,
+                                        SourceLocation SecondLoc,
+                                        Name SecondLockName) override {
     PartialDiagnosticAt Warning(
         SecondLoc, S.PDiag(diag::warn_second_thread_capability_acquired)
                        << SecondLockName);
@@ -2142,6 +2143,24 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
         FirstLoc, S.PDiag(diag::note_first_thread_capability_acquired)
                       << FirstLockName);
     Warnings.emplace_back(std::move(Warning), getNotes(std::move(Note)));
+  }
+
+  void handleDoubleThreadCapabilityDeclared(const NamedDecl *D,
+                                            SourceLocation AttrLoc) override {
+    PartialDiagnosticAt Warning(
+        AttrLoc, S.PDiag(diag::warn_multiple_thread_capabilities_required_attr)
+                     << isa<FunctionDecl>(D));
+    Warnings.emplace_back(std::move(Warning), getNotes());
+  }
+
+  void handleVerboseDynamicRequiresAttribute(const CXXMethodDecl *M,
+                                             Name LockName) override {
+    if (Verbose) {
+      PartialDiagnosticAt Remark(
+          M->getBeginLoc(), S.PDiag(diag::remark_dynamic_requires_attr_emitted)
+                                << LockName);
+      Warnings.emplace_back(std::move(Remark), OptionalNotes());
+    }
   }
 
   void enterFunction(const FunctionDecl* FD) override {

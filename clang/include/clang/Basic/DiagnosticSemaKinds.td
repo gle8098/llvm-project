@@ -3879,12 +3879,19 @@ def note_dynamic_requires_attr :
   Note<"lambda implicitly requires thread '%0'">;
 def note_dynamic_requires_attr_origin :
   Note<"... the thread was required for this statement">;
+def warn_multiple_thread_capabilities_required_attr :
+  Warning<"%select{value cannot be guarded by|function cannot require}0 "
+  "several thread capabilities">,
+  InGroup<ThreadSafetySTE>, DefaultIgnore;
 
 // Verbose thread safety warnings
 def warn_thread_safety_verbose : Warning<"thread safety verbose warning">,
   InGroup<ThreadSafetyVerbose>, DefaultIgnore;
 def note_thread_warning_in_fun : Note<"thread warning in function %0">;
 def note_guarded_by_declared_here : Note<"guarded_by declared here">;
+def remark_dynamic_requires_attr_emitted :
+  Remark<"dynamic thread capability '%0'">,
+  InGroup<ThreadSafetyVerbose>, DefaultIgnore;
 
 // Dummy warning that will trigger "beta" warnings from the analysis if enabled.
 def warn_thread_safety_beta : Warning<"thread safety beta warning">,

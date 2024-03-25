@@ -289,3 +289,56 @@ private:
 };
 
 }
+
+//=============================================================================
+
+namespace declared_multiple_thread_capabilities {
+
+class A {
+public:
+  ThreadExecutor* executor1;
+  ThreadExecutor* executor2;
+
+  int bar() __attribute__((requires_capability(*executor1, *executor2))) { return 1; }; // \
+      // expected-warning {{function cannot require several thread capabilities}}
+  int value __attribute__((guarded_by(*executor1))) __attribute__((guarded_by(*executor2))) = 1; // \
+      // expected-warning {{value cannot be guarded by several thread capabilities}}
+
+  void foo() {
+    auto valuePtr = &A::bar;
+    (void) valuePtr;
+
+    auto* valuePtr2 = &value;
+    (void) valuePtr2;
+  }
+};
+
+}
+
+//=============================================================================
+
+namespace local_var_following_many_threads {
+
+struct Pair {
+  Pair(int* a, int* b) {}
+};
+
+class A {
+public:
+  ThreadExecutor* executor1;
+  ThreadExecutor* executor2;
+
+  int value __attribute__((guarded_by(*executor1))) = 1;
+  int value2 __attribute__((guarded_by(*executor2))) = 5;
+
+  void foo() {
+    auto* valuePtr = &value;
+    *valuePtr = 4; // expected-warning {{values with capability 'executor1' are leaked to unsafe UnaryOperator}}
+
+    // todo: maybe warning about different capabilities?
+    Pair pair(&value, &value2); // expected-warning {{values with capability 'executor1' are leaked to unsafe object constructor 'local_var_following_many_threads::Pair'}} \
+        // expected-note@-4 {{capability is traced from here}}
+  }
+};
+
+}

@@ -1595,6 +1595,9 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
   llvm::SmallDenseMap<const Expr *, til::LiteralPtr *> ConstructedObjects;
   LocalVariableMap::Context LVarCtx;
   unsigned CtxIndex;
+  /// If a diagnostic was raised that a lock wasn't held. Used to suppress
+  /// subsequent diagnostics from LocalVarFollower
+  bool WarnedLockNotHeld = false;
 
   // helper functions
   bool insertDynamicAttr(const CapabilityExpr &Cp, Expr *MutexExp,
@@ -1630,6 +1633,10 @@ public:
   void VisitCXXConstructExpr(const CXXConstructExpr *Exp);
   void VisitDeclStmt(const DeclStmt *S);
   void VisitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *Exp);
+
+  /// Returns flag if any diagnostics were raised because of unheld lock. Then
+  /// clears the flag.
+  bool DidWarnLockNotHeld();
 };
 
 } // namespace
@@ -1643,34 +1650,42 @@ bool BuildLockset::insertDynamicAttr(const CapabilityExpr &Cp, Expr *MutexExp,
     return false;
   }
 
-  // Find for any other 'thread' capability taken. If we find one, then issue
-  // warning and return true, because there is no need for one more warning
-  // (mutex not held)
+  // Find for any other 'thread' capability taken
+  bool doubleThreadCapabilityError = false;
 
   for (auto LockID : FSet) {
     const auto &Lock = Analyzer->FactMan[LockID];
     if (Lock.getKind() == "thread" && !Lock.equals(Cp)) {
-      Analyzer->Handler.handleDoubleThreadCapability(
+      Analyzer->Handler.handleDoubleThreadCapabilityHeld(
           Lock.loc(), Lock.toString(), Loc, Cp.toString());
-      return true;
+      doubleThreadCapabilityError = true;
     }
   }
 
-  if (!Analyzer->CurrentMethodDynamicRequiresAttr.shouldIgnore()) {
+  if (!doubleThreadCapabilityError &&
+      !Analyzer->CurrentMethodDynamicRequiresAttr.shouldIgnore()) {
     // Oops, we already have assertion
     if (!Analyzer->CurrentMethodDynamicRequiresAttr.equals(Cp)) {
       auto &PrevDynamicCap =
           Analyzer->GlobalDynamicRequires->at(Analyzer->CurrentMethod);
-      Analyzer->Handler.handleDoubleThreadCapability(
+      Analyzer->Handler.handleDoubleThreadCapabilityHeld(
           PrevDynamicCap.Info.CapUsageLoc.getBegin(),
           PrevDynamicCap.Info.CapabilityName, Loc, Cp.toString());
-      return true;
+      doubleThreadCapabilityError = true;
     }
+  }
+
+  if (doubleThreadCapabilityError) {
+    WarnedLockNotHeld = true;
+    // Return true, because there is no need for one more warning (mutex not
+    // held)
+    return true;
   }
 
   // Okey, add the dynamic requires attribute
 
   assert(MutexExp);
+  assert(Analyzer->CurrentMethod);
   DynamicRequiresAttr globalRequires(
       MutexExp, Analyzer->CurrentMethod->getParent()->getLocation(), Loc,
       Cp.toString());
@@ -1743,20 +1758,25 @@ void BuildLockset::warnIfMutexNotHeld(const NamedDecl *D, const Expr *Exp,
       StringRef   PartMatchName(PartMatchStr);
       Analyzer->Handler.handleMutexNotHeld(Cp.getKind(), D, POK, Cp.toString(),
                                            LK, Loc, &PartMatchName);
+      NoError = false;
     } else {
       // There's no match at all.
       if (!insertDynamicAttr(Cp, MutexExp, Self, Loc)) {
         // Warn
         Analyzer->Handler.handleMutexNotHeld(Cp.getKind(), D, POK,
                                              Cp.toString(), LK, Loc);
+        NoError = false;
       }
     }
-    NoError = false;
   }
   // Make sure the mutex we found is the right kind.
   if (NoError && LDat && !LDat->isAtLeast(LK)) {
     Analyzer->Handler.handleMutexNotHeld(Cp.getKind(), D, POK, Cp.toString(),
                                          LK, Loc);
+    NoError = true;
+  }
+  if (!NoError) {
+    WarnedLockNotHeld = true;
   }
 }
 
@@ -1843,6 +1863,7 @@ void BuildLockset::checkAccess(const Expr *Exp, AccessKind AK,
 
   if (D->hasAttr<GuardedVarAttr>() && FSet.isEmpty(Analyzer->FactMan)) {
     Analyzer->Handler.handleNoMutexHeld(D, POK, AK, Loc);
+    WarnedLockNotHeld = true;
   }
 
   for (const auto *I : D->specific_attrs<GuardedByAttr>())
@@ -1879,8 +1900,10 @@ void BuildLockset::checkPtAccess(const Expr *Exp, AccessKind AK,
   if (!D || !D->hasAttrs())
     return;
 
-  if (D->hasAttr<PtGuardedVarAttr>() && FSet.isEmpty(Analyzer->FactMan))
+  if (D->hasAttr<PtGuardedVarAttr>() && FSet.isEmpty(Analyzer->FactMan)) {
     Analyzer->Handler.handleNoMutexHeld(D, PtPOK, AK, Exp->getExprLoc());
+    WarnedLockNotHeld = true;
+  }
 
   for (auto const *I : D->specific_attrs<PtGuardedByAttr>())
     warnIfMutexNotHeld(D, Exp, AK, I->getArg(), PtPOK, nullptr,
@@ -2020,11 +2043,12 @@ void BuildLockset::handleCall(const Expr *Exp, const NamedDecl *D,
     }
   }
 
-//  if (auto I = Analyzer->GlobalDynamicRequires->find(dyn_cast<FunctionDecl>(D));
-//      I != Analyzer->GlobalDynamicRequires->end()) {
-//    warnIfMutexNotHeld(D, Exp, I->getSecond().AK, I->getSecond().CapExpr,
-//                       POK_FunctionCall, nullptr, Loc);
-//  }
+  if (const auto *MethodD = dyn_cast<CXXMethodDecl>(D))
+    if (auto I = Analyzer->GlobalDynamicRequires->find(MethodD);
+        I != Analyzer->GlobalDynamicRequires->end()) {
+      warnIfMutexNotHeld(D, Exp, AK_Written, I->getSecond().CapExpr,
+                         POK_FunctionCall, nullptr, Loc);
+    }
 
   // Remove locks first to allow lock upgrading/downgrading.
   // FIXME -- should only fully remove if the attribute refers to 'this'.
@@ -2270,6 +2294,12 @@ void BuildLockset::VisitMaterializeTemporaryExpr(
   }
 }
 
+bool BuildLockset::DidWarnLockNotHeld() {
+  bool res = WarnedLockNotHeld;
+  WarnedLockNotHeld = false;
+  return res;
+}
+
 namespace {
 
 /// Class used to track possible leak of variable and function pointers,
@@ -2292,19 +2322,7 @@ class LocalVarFollower {
           FromDynamicRequires(FromDynamicRequires) {}
   };
 
-  // struct StickyCapabilityWithLoc {
-  //   StickyCapability *Base = nullptr;
-  //   SourceLocation PrevLoc;
-
-  //   StickyCapabilityWithLoc() = default;
-  //   StickyCapabilityWithLoc(StickyCapability *Base, SourceLocation PrevLoc)
-  //       : Base(Base), PrevLoc(PrevLoc) {}
-
-  //   bool IsInvalid() const { return Base == nullptr; }
-  // };
-  using StickyCapabilityWithLoc = StickyCapability *;
-
-  llvm::DenseMap<const Stmt *, StickyCapabilityWithLoc> StmtThreadInfoMap;
+  llvm::DenseMap<const Stmt *, StickyCapability *> StmtThreadInfoMap;
   llvm::DenseMap<const ValueDecl *, StickyCapability *> ValDeclThreadInfoMap;
 
   inline void AddTrackingStatement(const Stmt *S, StickyCapability *Base,
@@ -2323,12 +2341,12 @@ class LocalVarFollower {
     return &Analyzer->GlobalDynamicRequires->at(MethodDecl).Info;
   }
 
-  /// Finds none or one common StickyCapabilityWithLoc across a range of
+  /// Finds none or one common StickyCapability across a range of
   /// Stmt* objects. If two different sticky capabilities found, produces
   /// warning.
   template <typename Range>
-  StickyCapabilityWithLoc FindCommonThreadInfoInRange(const Range &range,
-                                                      SourceLocation Loc);
+  StickyCapability *FindCommonThreadInfoInRange(const Range &range,
+                                                SourceLocation Loc);
 
   // todo: description
   StickyCapability *FindThreadInfoFromDecl(const ValueDecl *Decl, const Expr *Exp,
@@ -2337,11 +2355,11 @@ class LocalVarFollower {
   void VisitDeclStmt(const DeclStmt *S);
   void VisitDeclRefExpr(const DeclRefExpr *DRE);
   void VisitLambdaExpr(const LambdaExpr *LE);
+  void VisitMemberExpr(const MemberExpr *Exp);
 
-  void VisitCallExpr(const CallExpr *CallExp,
-                     StickyCapabilityWithLoc ThreadInfo);
+  void VisitCallExpr(const CallExpr *CallExp, StickyCapability *ThreadInfo);
   void VisitCXXConstructExpr(const CXXConstructExpr *ConstructExpr,
-                             StickyCapabilityWithLoc ThreadInfo);
+                             StickyCapability *ThreadInfo);
 
 public:
   LocalVarFollower(ThreadSafetyAnalyzer *Analyzer, FactSet &FSet)
@@ -2353,11 +2371,9 @@ public:
 } // namespace
 
 template <typename Range>
-LocalVarFollower::StickyCapabilityWithLoc
+LocalVarFollower::StickyCapability *
 LocalVarFollower::FindCommonThreadInfoInRange(const Range &range,
                                               SourceLocation Loc) {
-  StickyCapabilityWithLoc Cap = nullptr;
-
   for (const Stmt *I : range) {
     if (const Expr *IExp = dyn_cast<Expr>(I)) {
       I = UnpackTemporaryConstruction(IExp);
@@ -2366,42 +2382,45 @@ LocalVarFollower::FindCommonThreadInfoInRange(const Range &range,
     if (auto ObjIt = StmtThreadInfoMap.find(I);
         ObjIt != StmtThreadInfoMap.end()) {
       StickyCapability *Obj = ObjIt->getSecond();
-      if (Cap) {
-        if (!Cap->CapExpr.equals(Obj->CapExpr))
-          Analyzer->Diag(Loc, "different capabilities required");
-      } else {
-        Cap = Obj;
+      if (Obj) {
+        return Obj;
       }
+
+      // todo: there might be other sticky capabilities, induced by different
+      // executors. However, it is unclear right now what shall be the right
+      // move to do in such case
     }
   }
 
-  return Cap;
+  return nullptr;
 }
 
 LocalVarFollower::StickyCapability *
 LocalVarFollower::FindThreadInfoFromDecl(const ValueDecl *Decl, const Expr *Exp,
                                          SourceLocation Loc) {
-  CapExprSet Locks;
-  StickyCapability *threadInfo = nullptr;
-  const CXXMethodDecl *fromDynamicRequires = nullptr;
+  if (const auto *MethodD = dyn_cast<CXXMethodDecl>(Decl))
+    if (auto I = Analyzer->GlobalDynamicRequires->find(MethodD);
+        I != Analyzer->GlobalDynamicRequires->end()) {
+      // Dynamic requires attributes are disabled for methods with explicit
+      // requires attribute, so it is provided the only lock we may find
 
-  // This should be first, because fromDynamicRequires is always used and the
-  // first lock is returned.  todo: fix description
-  if (auto I =
-          Analyzer->GlobalDynamicRequires->find(dyn_cast<CXXMethodDecl>(Decl));
-      I != Analyzer->GlobalDynamicRequires->end()) {
-    CapabilityExpr Cp = Analyzer->SxBuilder.translateAttrExpr(
-        I->getSecond().CapExpr, Decl, Exp, nullptr);
-    if (Cp.isInvalid()) {
-      warnInvalidLock(Analyzer->Handler, I->getSecond().CapExpr, Decl, Exp,
-                      Cp.getKind());
-    } else if (!Cp.shouldIgnore()) {
-      Locks.push_back_nodup(Cp);
-      fromDynamicRequires = dyn_cast<CXXMethodDecl>(Decl);
+      CapabilityExpr Cp = Analyzer->SxBuilder.translateAttrExpr(
+          I->getSecond().CapExpr, Decl, Exp, nullptr);
+      if (Cp.isInvalid()) {
+        warnInvalidLock(Analyzer->Handler, I->getSecond().CapExpr, Decl, Exp,
+                        Cp.getKind());
+      } else if (!Cp.shouldIgnore()) {
+        return new (Arena) StickyCapability(Cp, Exp->getSourceRange(), MethodD);
+      }
+
+      return nullptr;
     }
-  }
+
+  StickyCapability *threadInfo = nullptr;
 
   for (auto *A : Decl->attrs()) {
+    CapExprSet Locks;
+
     switch (A->getKind()) {
     case attr::RequiresCapability: {
       const auto *Attr = cast<RequiresCapabilityAttr>(A);
@@ -2426,23 +2445,23 @@ LocalVarFollower::FindThreadInfoFromDecl(const ValueDecl *Decl, const Expr *Exp,
     default:
       break;
     }
-  }
 
-  for (const auto &Lock : Locks) {
-    if (Lock.getKind() == "thread") {
-      const FactEntry *LDat = FSet.findLockUniv(Analyzer->FactMan, Lock);
-      if (LDat) {
-        fromDynamicRequires = nullptr;
-        continue;
+    bool warnIssued = false;
+    for (auto &Lock : Locks) {
+      if (Lock.getKind() == "thread") {
+        if (!threadInfo) {
+          threadInfo = new (Arena)
+              StickyCapability(std::move(Lock), Exp->getSourceRange(), nullptr);
+        } else {
+          Analyzer->Handler.handleDoubleThreadCapabilityDeclared(
+              Decl, A->getLocation());
+          warnIssued = true;
+          break;
+        }
       }
-
-      if (threadInfo) {
-        Analyzer->Diag(Loc, "Only one thread capability is possible");
-        break;
-      }
-      threadInfo = new (Arena)
-          StickyCapability(Lock, Exp->getSourceRange(), fromDynamicRequires);
     }
+    if (warnIssued)
+      break;
   }
 
   return threadInfo;
@@ -2490,8 +2509,16 @@ void LocalVarFollower::VisitLambdaExpr(const LambdaExpr *LE) {
   }
 }
 
+void LocalVarFollower::VisitMemberExpr(const MemberExpr *Exp) {
+  const auto *RefDecl = Exp->getMemberDecl();
+  auto *threadInfo = FindThreadInfoFromDecl(RefDecl, Exp, Exp->getMemberLoc());
+  if (threadInfo) {
+    AddTrackingStatement(Exp, threadInfo, Exp->getBeginLoc());
+  }
+}
+
 void LocalVarFollower::VisitCallExpr(const CallExpr *CallExp,
-                                     StickyCapabilityWithLoc ThreadInfo) {
+                                     StickyCapability *ThreadInfo) {
   bool WarnProduced = false;
 
   if (auto *MethodCall = dyn_cast<CXXMemberCallExpr>(CallExp)) {
@@ -2539,7 +2566,7 @@ void LocalVarFollower::VisitCallExpr(const CallExpr *CallExp,
 }
 
 void LocalVarFollower::VisitCXXConstructExpr(
-    const CXXConstructExpr *ConstructExpr, StickyCapabilityWithLoc ThreadInfo) {
+    const CXXConstructExpr *ConstructExpr, StickyCapability *ThreadInfo) {
   const auto *Ctor = ConstructExpr->getConstructor();
   auto CtorName = Ctor->getParent()->getQualifiedNameAsString();
 
@@ -2566,6 +2593,9 @@ void LocalVarFollower::RunAnalysis(const Stmt *S) {
   } else if (auto* DeclS = dyn_cast<DeclStmt>(S)) {
     VisitDeclStmt(DeclS);
     return;
+  } else if (auto *MExp = dyn_cast<MemberExpr>(S)) {
+    VisitMemberExpr(MExp);
+    return;
   }
 
   // Handle all other statements. They may rely only on existing 'thread info'.
@@ -2575,9 +2605,15 @@ void LocalVarFollower::RunAnalysis(const Stmt *S) {
     return;
   }
 
-  StickyCapabilityWithLoc WatchingThreadInfo =
+  StickyCapability *WatchingThreadInfo =
       FindCommonThreadInfoInRange(S->children(), S->getBeginLoc());
   if (!WatchingThreadInfo) {
+    return;
+  }
+
+  if (FSet.findLockUniv(Analyzer->FactMan, WatchingThreadInfo->CapExpr)) {
+    // We have this lock, don't check. Just propagate tracking info
+    AddTrackingStatement(S, WatchingThreadInfo, SourceLocation());
     return;
   }
 
@@ -2704,7 +2740,7 @@ static bool neverReturns(const CFGBlock *B) {
 /// Enable dynamic attributes only for lambdas defined in functions with enabled
 /// thread safety analysis.
 static bool supportsDynamicRequiresAttribute(const CXXMethodDecl *Method) {
-  if (!Method)
+  if (!Method || Method->hasAttr<RequiresCapabilityAttr>())
     return false;
 
   auto *RecordDecl = dyn_cast<CXXRecordDecl>(Method->getParent());
@@ -2930,8 +2966,18 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
       switch (BI.getKind()) {
         case CFGElement::Statement: {
           CFGStmt CS = BI.castAs<CFGStmt>();
+
+          // Clear the flag
+          LocksetBuilder.DidWarnLockNotHeld();
+
+          // Build the lockset
           LocksetBuilder.Visit(CS.getStmt());
-          LVarFollower.RunAnalysis(CS.getStmt());
+
+          // Do not run local variable follower, if unheld locks were found. It
+          // will probably issue garbage warnings
+          if (!LocksetBuilder.DidWarnLockNotHeld()) {
+            LVarFollower.RunAnalysis(CS.getStmt());
+          }
           break;
         }
         // Ignore BaseDtor and MemberDtor for now.

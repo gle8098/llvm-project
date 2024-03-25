@@ -264,10 +264,16 @@ public:
       Name TracedLockName, SourceLocation Loc,
       const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
 
-  virtual void handleDoubleThreadCapability(SourceLocation FirstLoc,
-                                            Name FirstLockName,
-                                            SourceLocation SecondLoc,
-                                            Name SecondLockName) {}
+  virtual void handleDoubleThreadCapabilityHeld(SourceLocation FirstLoc,
+                                                Name FirstLockName,
+                                                SourceLocation SecondLoc,
+                                                Name SecondLockName) {}
+
+  virtual void handleDoubleThreadCapabilityDeclared(const NamedDecl *D,
+                                                    SourceLocation AttrLoc) {}
+
+  virtual void handleVerboseDynamicRequiresAttribute(const CXXMethodDecl *M,
+                                                     Name LockName) {}
 
   /// Called by the analysis when starting analysis of a function.
   /// Used to issue suggestions for changes to annotations.
