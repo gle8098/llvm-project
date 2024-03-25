@@ -1098,24 +1098,25 @@ public:
 
   void runAnalysis(AnalysisDeclContext &AC);
 
-private:
-  // todo: remove this
-  DiagnosticBuilder Diag(SourceLocation Loc, StringRef Description,
-                         DiagnosticIDs::Level Level = DiagnosticIDs::Warning) {
-    assert(Loc.isValid());
-    auto &DiagEngine = *Handler.getDiagnosticsEngine();
-    assert(Handler.getDiagnosticsEngine());
+  // private:
+  //   // todo: remove this
+  //   DiagnosticBuilder Diag(SourceLocation Loc, StringRef Description,
+  //                          DiagnosticIDs::Level Level =
+  //                          DiagnosticIDs::Warning) {
+  //     assert(Loc.isValid());
+  //     auto &DiagEngine = *Handler.getDiagnosticsEngine();
+  //     assert(Handler.getDiagnosticsEngine());
 
-    unsigned ID = DiagEngine.getDiagnosticIDs()->getCustomDiagID(
-        Level, Description.str());
-    return DiagEngine.Report(Loc, ID);
-  }
+  //     unsigned ID = DiagEngine.getDiagnosticIDs()->getCustomDiagID(
+  //         Level, Description.str());
+  //     return DiagEngine.Report(Loc, ID);
+  //   }
 
-  // todo: remove
-  bool DiagVerbose(SourceLocation Loc) {
-    return !Handler.getDiagnosticsEngine()->isIgnored(
-        diag::warn_thread_safety_verbose, Loc);
-  }
+  //   // todo: remove
+  //   bool DiagVerbose(SourceLocation Loc) {
+  //     return !Handler.getDiagnosticsEngine()->isIgnored(
+  //         diag::warn_thread_safety_verbose, Loc);
+  //   }
 };
 
 } // namespace
@@ -1697,12 +1698,8 @@ bool BuildLockset::insertDynamicAttr(const CapabilityExpr &Cp, Expr *MutexExp,
   Analyzer->addLock(FSet, std::make_unique<LockableFactEntry>(
                               Cp, LK_Exclusive, Loc, FactEntry::Asserted));
 
-  if (Analyzer->DiagVerbose(Loc)) {
-    Analyzer->Diag(Analyzer->CurrentMethod->getBeginLoc(),
-                   "dynamic thread capability '%0'",
-                   clang::DiagnosticIDs::Remark)
-        << Cp.toString();
-  }
+  Analyzer->Handler.handleVerboseDynamicRequiresAttribute(
+      Analyzer->CurrentMethod, Cp.toString());
 
   return true;
 }
