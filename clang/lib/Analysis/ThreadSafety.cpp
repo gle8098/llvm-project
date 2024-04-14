@@ -2515,7 +2515,7 @@ void LocalVarFollower::VisitMemberExpr(const MemberExpr *Exp) {
 }
 
 void LocalVarFollower::VisitCallExpr(const CallExpr *CallExp,
-                                     StickyCapability *ThreadInfo) {
+                                     StickyCapability *ThreadInfo) {  
   bool WarnProduced = false;
 
   if (auto *MethodCall = dyn_cast<CXXMemberCallExpr>(CallExp)) {
@@ -2542,6 +2542,9 @@ void LocalVarFollower::VisitCallExpr(const CallExpr *CallExp,
       }
     }
   } else if (auto *FuncCallee = CallExp->getDirectCallee()) {
+    if (FuncCallee->hasAttr<NoThreadSafetyAnalysisAttr>()) {
+      return;
+    }
     auto name = FuncCallee->getQualifiedNameAsString();
     if (name != "std::bind") {
       Analyzer->Handler.handleCapLeaksToUnsafeCall(
