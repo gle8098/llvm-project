@@ -2153,6 +2153,28 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
+  void handleFunctionalObjectLosesRequiresAttr(
+      StringRef Kind, Name LockName, ValueLosesAnnotationKind VLAK,
+      SourceRange Loc, SourceRange TrackingOriginLoc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
+    PartialDiagnosticAt Warning(
+        Loc.getBegin(),
+        S.PDiag(diag::warn_tracking_functional_object_going_out_of_scope)
+            << Kind << LockName << VLAK);
+
+    OptionalNotes Notes;
+
+    if (!Loc.fullyContains(TrackingOriginLoc)) {
+      Notes.push_back(
+          PartialDiagnosticAt(TrackingOriginLoc.getBegin(),
+                              S.PDiag(diag::note_capability_trace_from_here)));
+    }
+
+    pushDynamicAttrNotes(Notes, DynamicRequiresAttr);
+    pushVerboseNote(Notes);
+    Warnings.emplace_back(std::move(Warning), std::move(Notes));
+  }
+
   void handleVerboseDynamicRequiresAttribute(const CXXMethodDecl *M,
                                              Name LockName) override {
     if (Verbose) {
@@ -2161,6 +2183,14 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
                                 << LockName);
       Warnings.emplace_back(std::move(Remark), OptionalNotes());
     }
+  }
+
+  void handleTrackingValuesModelFailure(const Stmt *St, Name Description,
+                                        SourceLocation Loc) override {
+    PartialDiagnosticAt Warning(
+        Loc, S.PDiag(diag::warn_thread_safety_tracking_model_failure)
+                 << St->getStmtClassName() << Description);
+    Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
   void enterFunction(const FunctionDecl* FD) override {

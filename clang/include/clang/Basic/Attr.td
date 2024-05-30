@@ -4205,3 +4205,11 @@ def STEExec : InheritableAttr {
   let Documentation = [Undocumented];
   let SimpleHandler = 1;
 }
+
+//def CapabilityHolder : InheritableAttr {
+//  let Spellings = [GNU<"capability_holder">];
+//  let Subjects = SubjectList<[TypedefName], ErrorDiag>;
+//  let Args = [StringArgument<"Arg">];
+//  let Documentation = [Undocumented];
+//  let SimpleHandler = 1;
+//}

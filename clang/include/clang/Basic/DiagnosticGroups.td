@@ -1052,6 +1052,7 @@ def ThreadSafetyPrecise    : DiagGroup<"thread-safety-precise">;
 def ThreadSafetyReference  : DiagGroup<"thread-safety-reference">;
 def ThreadSafetyNegative   : DiagGroup<"thread-safety-negative">;
 def ThreadSafetySTE        : DiagGroup<"thread-safety-ste">;
+def ThreadSafetySTEModelFailure : DiagGroup<"thread-safety-ste-model-failure">;
 def ThreadSafety : DiagGroup<"thread-safety",
                              [ThreadSafetyAttributes,
                               ThreadSafetyAnalysis,

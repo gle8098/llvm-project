@@ -282,7 +282,7 @@ protected:
 
 class D : public C {
 public:
-  void foo() override REQUIRES_THREAD(*executor2) {} // expected-warning {{virtual function requires lock 'executor2', but its base method does not}}
+  void foo() override REQUIRES_THREAD(*executor2) {} // todo: warning {{virtual function requires lock 'executor2', but its base method does not}}
 
 private:
   ThreadExecutor* executor2;

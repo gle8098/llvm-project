@@ -92,6 +92,13 @@ enum LockErrorKind {
 };
 
 // todo: description
+enum ValueLosesAnnotationKind {
+  VLAK_Unspecified,
+  VLAK_ByReturning,
+  VLAK_ByPassingAsArgument,
+};
+
+// todo: description
 struct DynamicRequiresAttrInfo {
   /// Name of lock
   std::string CapabilityName;
@@ -272,8 +279,16 @@ public:
   virtual void handleDoubleThreadCapabilityDeclared(const NamedDecl *D,
                                                     SourceLocation AttrLoc) {}
 
+  virtual void handleFunctionalObjectLosesRequiresAttr(
+      StringRef Kind, Name LockName, ValueLosesAnnotationKind VLAK,
+      SourceRange Loc, SourceRange TrackingOriginLoc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
+
   virtual void handleVerboseDynamicRequiresAttribute(const CXXMethodDecl *M,
                                                      Name LockName) {}
+
+  virtual void handleTrackingValuesModelFailure(const Stmt *S, Name Description,
+                                                SourceLocation Loc) {}
 
   /// Called by the analysis when starting analysis of a function.
   /// Used to issue suggestions for changes to annotations.
