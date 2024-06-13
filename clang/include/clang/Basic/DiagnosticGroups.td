@@ -1058,7 +1058,8 @@ def ThreadSafety : DiagGroup<"thread-safety",
                               ThreadSafetyAnalysis,
                               ThreadSafetyPrecise,
                               ThreadSafetyReference,
-                              ThreadSafetySTE]>;
+                              ThreadSafetySTE,
+                              ThreadSafetySTEModelFailure]>;
 def ThreadSafetyVerbose : DiagGroup<"thread-safety-verbose">;
 def ThreadSafetyBeta : DiagGroup<"thread-safety-beta">;
 

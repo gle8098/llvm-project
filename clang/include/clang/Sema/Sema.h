@@ -234,6 +234,8 @@ namespace sema {
 namespace threadSafety {
   class AnalysisCache;
   void threadSafetyCleanup(AnalysisCache* Cache);
+  void threadSafetyRegisterCapabilityHolder(AnalysisCache** Cache, DetachedCapabilityHolderAttr* Attr);
+  void threadSafetyRegisterExecuteWithCapability(AnalysisCache** Cache, DetachedExecuteWithCapabilityAttr* Attr);
 }
 
 // FIXME: No way to easily map from TemplateTypeParmTypes to

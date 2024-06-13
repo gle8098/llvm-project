@@ -28,6 +28,8 @@ class FunctionDecl;
 class NamedDecl;
 class CXXMethodDecl;
 class Stmt;
+class DetachedCapabilityHolderAttr;
+class DetachedExecuteWithCapabilityAttr;
 
 namespace threadSafety {
 
@@ -211,10 +213,12 @@ public:
   /// in the error message.
   /// \param LK -- The kind of access (i.e. read or write) that occurred
   /// \param Loc -- The location of the protected operation.
-  virtual void handleMutexNotHeld(StringRef Kind, const NamedDecl *D,
-                                  ProtectedOperationKind POK, Name LockName,
-                                  LockKind LK, SourceLocation Loc,
-                                  Name *PossibleMatch = nullptr) {}
+  virtual void handleMutexNotHeld(
+      StringRef Kind, const NamedDecl *D, ProtectedOperationKind POK,
+      Name LockName, LockKind LK, SourceLocation Loc,
+      Name *PossibleMatch = nullptr,
+      std::optional<SourceRange> TrackingOriginLoc = std::nullopt,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr = nullptr) {}
 
   /// Warn when acquiring a lock that the negative capability is not held.
   /// \param Kind -- the capability's name parameter (role, mutex, etc).
@@ -257,27 +261,11 @@ public:
                                                Name LockName,
                                                SourceLocation Loc) {}
 
-  virtual void handleCapLeaksToUnsafeCall(
-      const NamedDecl *CalleeDecl, Name LockName, bool isConstructor,
-      SourceRange CallLoc, SourceRange OriginLoc,
+  virtual void handleExecWithCapabilityUnsatisfied(
+      SourceLocation ArgLoc, const CXXMethodDecl *ExecMethodDecl,
+      Name UnsatisfiedLockName,
+      const llvm::SmallVector<std::string> &AcquiredLockNames,
       const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
-
-  virtual void handleCapLeaksToUnsafeStmt(
-      const Stmt *S, Name LockName, SourceRange OriginLoc,
-      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
-
-  virtual void handleExecWithMismatchedCap(
-      const CXXMethodDecl *ExecMethodDecl, Name AcquiringLockName,
-      Name TracedLockName, SourceLocation Loc,
-      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
-
-  virtual void handleDoubleThreadCapabilityHeld(SourceLocation FirstLoc,
-                                                Name FirstLockName,
-                                                SourceLocation SecondLoc,
-                                                Name SecondLockName) {}
-
-  virtual void handleDoubleThreadCapabilityDeclared(const NamedDecl *D,
-                                                    SourceLocation AttrLoc) {}
 
   virtual void handleFunctionalObjectLosesRequiresAttr(
       StringRef Kind, Name LockName, ValueLosesAnnotationKind VLAK,
@@ -289,6 +277,10 @@ public:
 
   virtual void handleTrackingValuesModelFailure(const Stmt *S, Name Description,
                                                 SourceLocation Loc) {}
+
+  virtual void handleAssumedCalledInAcquiredThread(
+      Name LockName, SourceLocation Loc, bool insertedDynamicAttr,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
 
   /// Called by the analysis when starting analysis of a function.
   /// Used to issue suggestions for changes to annotations.
@@ -318,6 +310,12 @@ void runThreadSafetyAnalysis(AnalysisDeclContext &AC,
                              AnalysisCache **Bset);
 
 void threadSafetyCleanup(AnalysisCache *Cache);
+
+void threadSafetyRegisterCapabilityHolder(AnalysisCache **Cache,
+                                          DetachedCapabilityHolderAttr *Attr);
+
+void threadSafetyRegisterExecuteWithCapability(
+    AnalysisCache **Cache, DetachedExecuteWithCapabilityAttr *Attr);
 
 /// Helper function that returns a LockKind required for the given level
 /// of access.

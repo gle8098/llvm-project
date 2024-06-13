@@ -51,6 +51,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/FormatVariadic.h"
 #include <algorithm>
 #include <deque>
 #include <iterator>
@@ -1822,20 +1823,27 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     }
   }
 
-  void pushDynamicAttrNotes(
+  void pushTracedCapabilityNotes(
+      OptionalNotes &ONS, Name LockName, SourceLocation Loc,
+      std::optional<SourceRange> &TrackingOriginLoc) const {
+    if (!TrackingOriginLoc || TrackingOriginLoc->fullyContains(Loc))
+      return;
+
+    ONS.push_back(PartialDiagnosticAt(
+        TrackingOriginLoc->getBegin(),
+        S.PDiag(diag::note_capability_traced_from_here) << LockName));
+  }
+
+  void pushDynamicAttrNote(
       OptionalNotes &ONS,
       const DynamicRequiresAttrInfo *DynamicRequiresAttr) const {
     if (!DynamicRequiresAttr)
       return;
 
     ONS.push_back(
-        PartialDiagnosticAt(DynamicRequiresAttr->LambdaLoc,
+        PartialDiagnosticAt(DynamicRequiresAttr->CapUsageLoc.getBegin(),
                             S.PDiag(diag::note_dynamic_requires_attr)
                                 << DynamicRequiresAttr->CapabilityName));
-
-    ONS.push_back(
-        PartialDiagnosticAt(DynamicRequiresAttr->CapUsageLoc.getBegin(),
-                            S.PDiag(diag::note_dynamic_requires_attr_origin)));
   }
 
   OptionalNotes makeLockedHereNote(SourceLocation LocLocked, StringRef Kind) {
@@ -1967,11 +1975,13 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
-  void handleMutexNotHeld(StringRef Kind, const NamedDecl *D,
-                          ProtectedOperationKind POK, Name LockName,
-                          LockKind LK, SourceLocation Loc,
-                          Name *PossibleMatch) override {
+  void handleMutexNotHeld(
+      StringRef Kind, const NamedDecl *D, ProtectedOperationKind POK,
+      Name LockName, LockKind LK, SourceLocation Loc, Name *PossibleMatch,
+      std::optional<SourceRange> TrackingOriginLoc,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
     unsigned DiagID = 0;
+    OptionalNotes Notes;
     if (PossibleMatch) {
       switch (POK) {
         case POK_VarAccess:
@@ -1989,19 +1999,14 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
         case POK_PtPassByRef:
           DiagID = diag::warn_pt_guarded_pass_by_reference;
           break;
-      }
-      PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID) << Kind
-                                                       << D
-                                                       << LockName << LK);
-      PartialDiagnosticAt Note(Loc, S.PDiag(diag::note_found_mutex_near_match)
-                                        << *PossibleMatch);
-      if (Verbose && POK == POK_VarAccess) {
-        PartialDiagnosticAt VNote(D->getLocation(),
-                                  S.PDiag(diag::note_guarded_by_declared_here)
-                                      << D->getDeclName());
-        Warnings.emplace_back(std::move(Warning), getNotes(Note, VNote));
-      } else
-        Warnings.emplace_back(std::move(Warning), getNotes(Note));
+        }
+
+        Notes.push_back(PartialDiagnosticAt(
+            Loc, S.PDiag(diag::note_found_mutex_near_match) << *PossibleMatch));
+        if (Verbose && POK == POK_VarAccess)
+          Notes.push_back(PartialDiagnosticAt(
+              D->getLocation(), S.PDiag(diag::note_guarded_by_declared_here)
+                                    << D->getDeclName()));
     } else {
       switch (POK) {
         case POK_VarAccess:
@@ -2020,16 +2025,18 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
           DiagID = diag::warn_pt_guarded_pass_by_reference;
           break;
       }
-      PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID) << Kind
-                                                       << D
-                                                       << LockName << LK);
-      if (Verbose && POK == POK_VarAccess) {
-        PartialDiagnosticAt Note(D->getLocation(),
-                                 S.PDiag(diag::note_guarded_by_declared_here));
-        Warnings.emplace_back(std::move(Warning), getNotes(Note));
-      } else
-        Warnings.emplace_back(std::move(Warning), getNotes());
+
+      if (Verbose && POK == POK_VarAccess)
+        Notes.push_back(PartialDiagnosticAt(
+            D->getLocation(), S.PDiag(diag::note_guarded_by_declared_here)));
     }
+
+    PartialDiagnosticAt Warning(Loc, S.PDiag(DiagID)
+                                         << Kind << D << LockName << LK);
+    pushTracedCapabilityNotes(Notes, LockName, Loc, TrackingOriginLoc);
+    pushDynamicAttrNote(Notes, DynamicRequiresAttr);
+    pushVerboseNote(Notes);
+    Warnings.emplace_back(std::move(Warning), std::move(Notes));
   }
 
   void handleNegativeNotHeld(StringRef Kind, Name LockName, Name Neg,
@@ -2074,83 +2081,29 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
-  void handleCapLeaksToUnsafeCall(
-      const NamedDecl *CalleeDecl, Name LockName, bool isConstructor,
-      SourceRange CallLoc, SourceRange OriginLoc,
+  void handleExecWithCapabilityUnsatisfied(
+      SourceLocation ArgLoc, const CXXMethodDecl *ExecMethodDecl,
+      Name UnsatisfiedLockName,
+      const llvm::SmallVector<std::string> &AcquiredLockNames,
       const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
     PartialDiagnosticAt Warning(
-        CallLoc.getBegin(), S.PDiag(diag::warn_capability_leaks_to_unsafe_call)
-                                << LockName
-                                << CalleeDecl->getQualifiedNameAsString()
-                                << static_cast<int>(isConstructor));
+        ArgLoc, S.PDiag(diag::warn_exec_with_capability_unsatisfied)
+                    << ExecMethodDecl << UnsatisfiedLockName);      
 
     OptionalNotes Notes;
 
-    if (!CallLoc.fullyContains(OriginLoc)) {
+    if (!AcquiredLockNames.empty()) {
+      auto ListOfAcquiredLocks = llvm::formatv(
+          "'{0:$[', ']}'",
+          llvm::make_range(AcquiredLockNames.begin(), AcquiredLockNames.end()));
       Notes.push_back(
-          PartialDiagnosticAt(OriginLoc.getBegin(),
-                              S.PDiag(diag::note_capability_trace_from_here)));
+          PartialDiagnosticAt(ArgLoc, S.PDiag(diag::note_acquired_capabilities)
+                                          << ListOfAcquiredLocks.str()));
     }
 
-    pushDynamicAttrNotes(Notes, DynamicRequiresAttr);
+    pushDynamicAttrNote(Notes, DynamicRequiresAttr);
     pushVerboseNote(Notes);
     Warnings.emplace_back(std::move(Warning), std::move(Notes));
-  }
-
-  void handleCapLeaksToUnsafeStmt(
-      const Stmt *Stmt, Name LockName, SourceRange OriginLoc,
-      const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
-    PartialDiagnosticAt Warning(
-        Stmt->getBeginLoc(), S.PDiag(diag::warn_capability_leaks_to_unsafe_stmt)
-                                 << LockName << Stmt->getStmtClassName());
-
-    OptionalNotes Notes;
-
-    if (!Stmt->getSourceRange().fullyContains(OriginLoc)) {
-      Notes.push_back(
-          PartialDiagnosticAt(OriginLoc.getBegin(),
-                              S.PDiag(diag::note_capability_trace_from_here)));
-    }
-
-    pushDynamicAttrNotes(Notes, DynamicRequiresAttr);
-    pushVerboseNote(Notes);
-    Warnings.emplace_back(std::move(Warning), std::move(Notes));
-  }
-
-  void handleExecWithMismatchedCap(
-      const CXXMethodDecl *ExecMethodDecl, Name AcquiringLockName,
-      Name TracedLockName, SourceLocation Loc,
-      const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
-    PartialDiagnosticAt Warning(
-        Loc, S.PDiag(diag::warn_exec_with_mismatched_capability)
-                 << ExecMethodDecl << AcquiringLockName << TracedLockName);
-
-    OptionalNotes Notes;
-    pushDynamicAttrNotes(Notes, DynamicRequiresAttr);
-    pushVerboseNote(Notes);
-
-    Warnings.emplace_back(std::move(Warning), std::move(Notes));
-  }
-
-  void handleDoubleThreadCapabilityHeld(SourceLocation FirstLoc,
-                                        Name FirstLockName,
-                                        SourceLocation SecondLoc,
-                                        Name SecondLockName) override {
-    PartialDiagnosticAt Warning(
-        SecondLoc, S.PDiag(diag::warn_second_thread_capability_acquired)
-                       << SecondLockName);
-    PartialDiagnosticAt Note(
-        FirstLoc, S.PDiag(diag::note_first_thread_capability_acquired)
-                      << FirstLockName);
-    Warnings.emplace_back(std::move(Warning), getNotes(std::move(Note)));
-  }
-
-  void handleDoubleThreadCapabilityDeclared(const NamedDecl *D,
-                                            SourceLocation AttrLoc) override {
-    PartialDiagnosticAt Warning(
-        AttrLoc, S.PDiag(diag::warn_multiple_thread_capabilities_required_attr)
-                     << isa<FunctionDecl>(D));
-    Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
   void handleFunctionalObjectLosesRequiresAttr(
@@ -2165,12 +2118,12 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     OptionalNotes Notes;
 
     if (!Loc.fullyContains(TrackingOriginLoc)) {
-      Notes.push_back(
-          PartialDiagnosticAt(TrackingOriginLoc.getBegin(),
-                              S.PDiag(diag::note_capability_trace_from_here)));
+      Notes.push_back(PartialDiagnosticAt(
+          TrackingOriginLoc.getBegin(),
+          S.PDiag(diag::note_capability_traced_from_here) << LockName));
     }
 
-    pushDynamicAttrNotes(Notes, DynamicRequiresAttr);
+    pushDynamicAttrNote(Notes, DynamicRequiresAttr);
     pushVerboseNote(Notes);
     Warnings.emplace_back(std::move(Warning), std::move(Notes));
   }
@@ -2191,6 +2144,20 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
         Loc, S.PDiag(diag::warn_thread_safety_tracking_model_failure)
                  << St->getStmtClassName() << Description);
     Warnings.emplace_back(std::move(Warning), getNotes());
+  }
+
+  virtual void handleAssumedCalledInAcquiredThread(
+      Name LockName, SourceLocation Loc, bool insertedDynamicAttr,
+      const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
+    PartialDiagnosticAt Warning(
+        Loc, S.PDiag(diag::warn_assumed_called_in_acquired_thread)
+                 << LockName << (insertedDynamicAttr ? 1 : 0));
+
+    OptionalNotes Notes;
+    pushDynamicAttrNote(Notes, DynamicRequiresAttr);
+    pushVerboseNote(Notes);
+
+    Warnings.emplace_back(std::move(Warning), std::move(Notes));
   }
 
   void enterFunction(const FunctionDecl* FD) override {

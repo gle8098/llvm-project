@@ -638,6 +638,12 @@ static void checkAttrArgsAreCapabilityObjs(Sema &S, Decl *D,
       continue;
     }
 
+    if (isa<CXXNullPtrLiteralExpr>(ArgExp)) {
+      // Allow nullptr for ExecuteWithCapabilityAttr
+      Args.push_back(ArgExp);
+      continue;
+    }
+
     QualType ArgTy = ArgExp->getType();
 
     // A pointer to member expression of the form  &MyClass::mu is treated
@@ -796,6 +802,48 @@ static void handleAssertExclusiveLockAttr(Sema &S, Decl *D,
   Expr **StartArg = Size == 0 ? nullptr : &Args[0];
   D->addAttr(::new (S.Context)
                  AssertExclusiveLockAttr(S.Context, AL, StartArg, Size));
+}
+
+static void handleExecuteWithCapabilityAttr(Sema &S, Decl *D,
+                                            const ParsedAttr &AL) {
+  SmallVector<Expr *, 2> Args;
+  checkAttrArgsAreCapabilityObjs(S, D, AL, Args);
+
+  D->addAttr(::new (S.Context) ExecuteWithCapabilityAttr(
+      S.Context, AL, Args.data(), Args.size()));
+}
+
+static void handleDetachedCapabilityHolder(Sema &S, Decl *D,
+                                           const ParsedAttr &AL) {
+
+  StringRef TypeName("");
+  if (!S.checkStringLiteralArgumentAttr(AL, 0, TypeName, nullptr) ||
+      TypeName.empty())
+    // fixme -- add diagnostic for TypeName.empty() case
+    return;
+
+  auto *Attr =
+      ::new (S.Context) DetachedCapabilityHolderAttr(S.Context, AL, TypeName);
+  threadSafetyRegisterCapabilityHolder(&S.ThreadSafetyDeclCache, Attr);
+  D->addAttr(Attr);
+}
+
+static void handleDetachedExecuteWithCapability(Sema &S, Decl *D,
+                                                const ParsedAttr &AL) {
+  StringRef TypeName("");
+  if (!S.checkStringLiteralArgumentAttr(AL, 0, TypeName, nullptr) ||
+      TypeName.empty())
+    // fixme -- add diagnostic for TypeName.empty() case
+    return;
+
+  SmallVector<Expr *, 2> Args;
+  if (AL.getNumArgs() > 1)
+    checkAttrArgsAreCapabilityObjs(S, D, AL, Args, 1);
+
+  auto *Attr = ::new (S.Context) DetachedExecuteWithCapabilityAttr(
+      S.Context, AL, TypeName, Args.data(), Args.size());
+  threadSafetyRegisterExecuteWithCapability(&S.ThreadSafetyDeclCache, Attr);
+  D->addAttr(Attr);
 }
 
 /// Checks to be sure that the given parameter number is in bounds, and
@@ -9494,9 +9542,16 @@ ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D, const ParsedAttr &AL,
     handleSimpleAttribute<UsingIfExistsAttr>(S, D, AL);
     break;
 
-  case ParsedAttr::AT_STEExec:
-    // todo: check self is a capability object
-    handleSimpleAttribute<STEExecAttr>(S, D, AL);
+  case ParsedAttr::AT_ExecuteWithCapability:
+    handleExecuteWithCapabilityAttr(S, D, AL);
+    break;
+
+  case ParsedAttr::AT_DetachedCapabilityHolder:
+    handleDetachedCapabilityHolder(S, D, AL);
+    break;
+
+  case ParsedAttr::AT_DetachedExecuteWithCapability:
+    handleDetachedExecuteWithCapability(S, D, AL);
     break;
   }
 }

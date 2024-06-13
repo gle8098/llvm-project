@@ -3858,37 +3858,23 @@ def note_found_mutex_near_match : Note<"found near match '%0'">;
 // Thread safety warnings related to 'thread' capability
 def warn_thread_safety_ste : Warning<"thread safety STE warning">,
   InGroup<ThreadSafetySTE>, DefaultIgnore;
-def warn_capability_leaks_to_unsafe_call :
-  Warning<"values with capability '%0' are leaked to unsafe "
-  "%select{call|object constructor}2 '%1'">,
+def warn_exec_with_capability_unsatisfied :
+  Warning<"argument of %0 requires '%1' capability">,
   InGroup<ThreadSafetySTE>, DefaultIgnore;
-def warn_capability_leaks_to_unsafe_stmt :
-  Warning<"values with capability '%0' are leaked to unsafe %1">,
-  InGroup<ThreadSafetySTE>, DefaultIgnore;
-def warn_exec_with_mismatched_capability :
-  Warning<"calling %0 acquires '%1' capability, but argument is "
-  "associated with '%2' capability">,
-  InGroup<ThreadSafetySTE>, DefaultIgnore;
-def warn_second_thread_capability_acquired :
-  Warning<"attempt to take the second thread capability '%0'">,
-  InGroup<ThreadSafetySTE>, DefaultIgnore;
+def note_acquired_capabilities :
+  Note<"acquired capabilities: %0">;
 def note_first_thread_capability_acquired :
   Note<"the first thread capability was '%0'">;
-def warn_multiple_thread_capabilities_required_attr :
-  Warning<"%select{value cannot be guarded by|function cannot require}0 "
-  "several thread capabilities">,
-  InGroup<ThreadSafetySTE>, DefaultIgnore;
 
 // Thread safety warnings related to values tracking
 def warn_tracking_functional_object_going_out_of_scope :
   Warning<"functional object requiring %0 '%1' loses its annotation"
   "%select{| by returning from function| by passing as argument to function call}2">,
   InGroup<ThreadSafetySTE>, DefaultIgnore;
-def note_capability_trace_from_here : Note<"capability is traced from here">;
+def note_capability_traced_from_here :
+  Note<"capability '%0' is traced from here">;
 def note_dynamic_requires_attr :
-  Note<"lambda implicitly requires thread '%0'">;
-def note_dynamic_requires_attr_origin :
-  Note<"... the thread was required for this statement">;
+  Note<"lambda implicitly requires thread '%0' for this statement">;
 
 // Verbose thread safety warnings
 def warn_thread_safety_verbose : Warning<"thread safety verbose warning">,
@@ -3905,6 +3891,10 @@ def warn_thread_safety_beta : Warning<"thread safety beta warning">,
 
 def warn_thread_safety_tracking_model_failure :
   Warning<"statement %0 does not fit into tracking values model (%1)">,
+  InGroup<ThreadSafetySTEModelFailure>, DefaultIgnore;
+def warn_assumed_called_in_acquired_thread :
+  Warning<"assume safe passing functional object with capability '%0' "
+  "%select{because it was acquired|as it was dynamically required}1">,
   InGroup<ThreadSafetySTEModelFailure>, DefaultIgnore;
 
 // Consumed warnings

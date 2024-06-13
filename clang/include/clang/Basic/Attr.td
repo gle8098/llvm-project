@@ -4199,17 +4199,51 @@ def AvailableOnlyInDefaultEvalMethod : InheritableAttr {
   let Documentation = [Undocumented];
 }
 
-def STEExec : InheritableAttr {
-  let Spellings = [GNU<"ste_exec">];
+def ExecuteWithCapability : InheritableAttr {
+  let Spellings = [Clang<"execute_with_capability">];
   let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Args = [VariadicExprArgument<"Args">];
+  let Documentation = [Undocumented];
+
+  let LateParsed = 1;
+  let TemplateDependent = 1;
+  let ParseArgumentsAsUnevaluated = 1;
+}
+
+def DetachedExecuteWithCapability : Attr {
+  let Spellings = [CXX11<"clang", "det_execute_with_capability">];
+  let Subjects = SubjectList<[Empty], ErrorDiag, "empty declaration">;
+  let Args = [StringArgument<"DeclType">, VariadicExprArgument<"Args">];
+  let Documentation = [Undocumented];
+
+  let LateParsed = 1;
+  let TemplateDependent = 1;
+  let ParseArgumentsAsUnevaluated = 1;
+}
+
+def CapabilityHolder : Attr {
+  let Spellings = [Clang<"capability_holder">];
+  let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
   let SimpleHandler = 1;
 }
 
-//def CapabilityHolder : InheritableAttr {
-//  let Spellings = [GNU<"capability_holder">];
-//  let Subjects = SubjectList<[TypedefName], ErrorDiag>;
-//  let Args = [StringArgument<"Arg">];
-//  let Documentation = [Undocumented];
-//  let SimpleHandler = 1;
-//}
+def DetachedCapabilityHolder : Attr {
+  let Spellings = [CXX11<"clang", "det_capability_holder">];
+  let Subjects = SubjectList<[Empty], ErrorDiag, "empty declaration">;
+  let Args = [StringArgument<"Arg">];
+  let Documentation = [Undocumented];
+}
+
+// def NoTrackingCapability : StmtAttr {
+//   let Spellings = [CXX11<"clang", "no_tracking_capability">];
+//   let Subjects = SubjectList<[CompoundStmt], ErrorDiag, "empty declaration">;
+//   let Documentation = [Undocumented];
+// }
+
+def NoTrackingCapability : InheritableAttr {
+  let Spellings = [Clang<"no_tracking_capability">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
