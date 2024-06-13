@@ -1,37 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only -verify -std=c++17 -Wthread-safety -Wthread-safety-ste -fcxx-exceptions %s
-
-//=============================================================================
-
-#define USE_CAPABILITY 1
-#include "thread-safety-annotations.h"
-
-class LOCKABLE Mutex {
- public:
-  void Lock() EXCLUSIVE_LOCK_FUNCTION();
-  void ReaderLock() SHARED_LOCK_FUNCTION();
-  void Unlock() UNLOCK_FUNCTION();
-  void ExclusiveUnlock() EXCLUSIVE_UNLOCK_FUNCTION();
-  void ReaderUnlock() SHARED_UNLOCK_FUNCTION();
-  bool TryLock() EXCLUSIVE_TRYLOCK_FUNCTION(true);
-  bool ReaderTryLock() SHARED_TRYLOCK_FUNCTION(true);
-  void LockWhen(const int &cond) EXCLUSIVE_LOCK_FUNCTION();
-
-  void PromoteShared() SHARED_UNLOCK_FUNCTION() EXCLUSIVE_LOCK_FUNCTION();
-  void DemoteExclusive() EXCLUSIVE_UNLOCK_FUNCTION() SHARED_LOCK_FUNCTION();
-
-  // for negative capabilities
-  const Mutex& operator!() const { return *this; }
-
-  void AssertHeld()       ASSERT_EXCLUSIVE_LOCK();
-  void AssertReaderHeld() ASSERT_SHARED_LOCK();
-};
-
-class SCOPED_LOCKABLE MutexLock {
- public:
-  MutexLock(Mutex *mu) EXCLUSIVE_LOCK_FUNCTION(mu);
-  MutexLock(Mutex *mu, bool adopt) EXCLUSIVE_LOCKS_REQUIRED(mu);
-  ~MutexLock() UNLOCK_FUNCTION();
-};
+// RUN: %clang_cc1 -fsyntax-only -verify -std=c++17 -Wthread-safety -Wthread-safety-ste -Wthread-safety-ste-model-failure -fcxx-exceptions %s
 
 //=============================================================================
 
@@ -39,29 +6,70 @@ class SCOPED_LOCKABLE MutexLock {
 #error "Feature disabled"
 #endif
 
-#define THREAD_CAPABILITY __attribute__((capability("thread")))
+#define CAPABILITY(x) __attribute__((capability(x)))
+#define LOCKABLE CAPABILITY("mutex")
+#define THREAD_CAPABILITY CAPABILITY("thread")
+#define SCOPED_LOCKABLE __attribute__((scoped_lockable))
 
-#define GUARDED_BY_THREAD(x) __attribute__((guarded_by(x)))
+#define ACQUIRE(...)            __attribute__((acquire_capability(__VA_ARGS__)))
+#define ACQUIRE_SHARED(...)     __attribute__((acquire_shared_capability(__VA_ARGS__)))
+#define RELEASE_GENERIC(...)    __attribute__((release_generic_capability(__VA_ARGS__)))
+#define RELEASE(...)            __attribute__((release_capability(__VA_ARGS__)))
+#define RELEASE_SHARED(...)     __attribute__((release_shared_capability(__VA_ARGS__)))
+#define TRY_ACQUIRE(...)        __attribute__((try_acquire_capability(__VA_ARGS__)))
+#define TRY_ACQUIRE_SHARED(...) __attribute__((try_acquire_shared_capability(__VA_ARGS__)))
 
-#define PT_GUARDED_BY_THREAD(x) __attribute__((pt_guarded_by(x)))
+#define GUARDED_BY(x) __attribute__((guarded_by(x)))
+#define PT_GUARDED_BY(x) __attribute__((pt_guarded_by(x)))
 
-#define REQUIRES_THREAD(...) __attribute__((requires_capability(__VA_ARGS__)))
+#define REQUIRES(...) __attribute__((requires_capability(__VA_ARGS__)))
+#define REQUIRES_SHARED(...) __attribute__((requires_shared_capability(__VA_ARGS__)))
+#define EXCLUDES(...) __attribute__((locks_excluded(__VA_ARGS__)))
 
-#define EXCLUDES_THREAD(...) __attribute__((locks_excluded(__VA_ARGS__)))
-#define ASSERT_IN_THREAD(x) __attribute__((assert_capability(x)))
+#define ASSERT_CAPABILITY(x) __attribute__((assert_capability(x)))
+#define ASSERT_SHARED_CAPABILITY(x) __attribute__((assert_shared_capability(x)))
 
-#define EXECUTE_IN_THREAD(...) __attribute__((execute_with_capability(__VA_ARGS__)))
-
-#define DETACHED_EXECUTE_IN_THREAD(...) [[clang::det_execute_with_capability(__VA_ARGS__)]];
+#define EXECUTE_WITH_CAPABILITY(...) __attribute__((execute_with_capability(__VA_ARGS__)))
+#define DETACHED_EXECUTE_WITH_CAPABILITY(...) [[clang::det_execute_with_capability(__VA_ARGS__)]];
 
 #define CAPABILITY_HOLDER(x) __attribute__((capability_holder(x)))
-
 #define DETACHED_CAPABILITY_HOLDER(x) [[clang::det_capability_holder(x)]];
 
 #define NO_TRACKING_CAPABILITY __attribute__((no_tracking_capability))
+#define NO_THREAD_SAFETY_ANALYSIS __attribute__((no_thread_safety_analysis))
 
 DETACHED_CAPABILITY_HOLDER("std::function")
 DETACHED_CAPABILITY_HOLDER("std::bind")
+
+//=============================================================================
+
+class LOCKABLE Mutex {
+ public:
+  void Lock() ACQUIRE();
+  void ReaderLock() ACQUIRE_SHARED();
+  void Unlock() RELEASE_GENERIC();
+  void ExclusiveUnlock() RELEASE();
+  void ReaderUnlock() RELEASE_SHARED();
+  bool TryLock() TRY_ACQUIRE(true);
+  bool ReaderTryLock() TRY_ACQUIRE_SHARED(true);
+  void LockWhen(const int &cond) ACQUIRE();
+
+  void PromoteShared()   RELEASE_SHARED() ACQUIRE();
+  void DemoteExclusive() RELEASE() ACQUIRE_SHARED();
+
+  // for negative capabilities
+  const Mutex& operator!() const { return *this; }
+
+  void AssertHeld()       ASSERT_CAPABILITY();
+  void AssertReaderHeld() ASSERT_SHARED_CAPABILITY();
+};
+
+class SCOPED_LOCKABLE MutexLock {
+ public:
+  MutexLock(Mutex *mu) ACQUIRE(mu);
+  MutexLock(Mutex *mu, bool adopt) ACQUIRE(mu);
+  ~MutexLock() RELEASE_GENERIC();
+};
 
 //=============================================================================
 
@@ -86,7 +94,7 @@ public:
     function(Functor f) {}
 
     // copy constructor
-    function(function const& rhs) {}
+    function(function const& rhs) = default;
 
     R operator()(Args... args)
     {
@@ -120,9 +128,9 @@ public:
 
     using TaskBody = std::function<void()>;
 
-    virtual void assertInThread() const noexcept ASSERT_IN_THREAD() = 0;
+    virtual void assertInThread() const noexcept ASSERT_CAPABILITY() = 0;
 
-    inline bool exec(TaskBody taskBody, TaskCallerContext taskCallerContext = {}) EXECUTE_IN_THREAD()
+    inline bool exec(TaskBody taskBody, TaskCallerContext taskCallerContext = {}) EXECUTE_WITH_CAPABILITY()
     {
         return execImpl(taskBody, taskCallerContext);
     };
@@ -135,7 +143,7 @@ protected:
      */
     virtual bool execImpl(TaskBody taskBody, TaskCallerContext taskCallerContext) = 0;
 };
-DETACHED_EXECUTE_IN_THREAD("ThreadExecutor::execPeriodicTask")
+DETACHED_EXECUTE_WITH_CAPABILITY("ThreadExecutor::execPeriodicTask")
 
 //=============================================================================
 
@@ -156,9 +164,9 @@ public:
 
 private:
     void init();
-    void startImpl() REQUIRES_THREAD(*singleThreadExecutor);
+    void startImpl() REQUIRES(*singleThreadExecutor);
 
-    void increaseImpl() REQUIRES_THREAD(*singleThreadExecutor);
+    void increaseImpl() REQUIRES(*singleThreadExecutor);
     void divideCounterByTenImpl();
 
     void onCounterChanged();
@@ -166,10 +174,10 @@ private:
     ThreadExecutor* singleThreadExecutor = nullptr;
     ThreadExecutor* callbackExecutor;
 
-    PeriodicTask periodicCounterIncrease GUARDED_BY_THREAD(*singleThreadExecutor);
-    int counter GUARDED_BY_THREAD(*singleThreadExecutor) = 0;
+    PeriodicTask periodicCounterIncrease GUARDED_BY(*singleThreadExecutor);
+    int counter GUARDED_BY(*singleThreadExecutor) = 0;
 
-    std::function<void()> counterChanged GUARDED_BY_THREAD(*callbackExecutor);
+    std::function<void()> counterChanged GUARDED_BY(*callbackExecutor);
 };
 
 //=============================================================================
@@ -210,14 +218,16 @@ SomeClass::SomeClass() {
 }
 
 void SomeClass::init() {
-    callbackExecutor->exec([this] { startImpl(); }); // expected-warning {{calling 'exec' acquires 'callbackExecutor' capability, but argument is associated with 'singleThreadExecutor' capability}} \
-                                                     // expected-note {{lambda implicitly requires thread 'singleThreadExecutor'}} \
-                                                     // expected-note {{... the thread was required for this statement}}
+  callbackExecutor->exec([this] { startImpl(); }); // expected-warning {{argument of 'exec' requires 'singleThreadExecutor' capability}} \
+                                                   // expected-note {{acquired capabilities: 'callbackExecutor'}} \
+                                                   // expected-note {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
 }
 
 void SomeClass::startImpl() {
-    counter = 1;
-    periodicCounterIncrease = singleThreadExecutor->execPeriodicTask(std::bind(&SomeClass::increaseImpl, this), 300);
+  counter = 1;
+  periodicCounterIncrease = singleThreadExecutor->execPeriodicTask(std::bind(&SomeClass::increaseImpl, this), 300);
+  (void) callbackExecutor->execPeriodicTask(std::bind(&SomeClass::increaseImpl, this), 300); // expected-warning {{argument of 'execPeriodicTask' requires 'singleThreadExecutor' capability}} \
+                                                                                             // expected-note {{acquired capabilities: 'callbackExecutor'}}
 }
 
 
@@ -225,20 +235,26 @@ void SomeClass::startImpl() {
 void SomeClass::increase() {
     auto func = std::bind(&SomeClass::increaseImpl, this);
 
-    func(); // expected-warning {{values with capability 'singleThreadExecutor' are leaked to unsafe call 'std::impl::binder<void (SomeClass::*)(), SomeClass *>::operator()'}} \
-            // expected-note@-2 {{capability is traced from here}}
-    (func)();
-    // NO_TRACKING_CAPABILITY {func();}
+    func(); // expected-warning {{calling function 'operator()<>' requires holding thread 'singleThreadExecutor' exclusively}} \
+            // expected-note@-2 {{capability 'singleThreadExecutor' is traced from here}}
+    (func)();  // expected-warning {{calling function 'operator()<>' requires holding thread 'singleThreadExecutor' exclusively}} \
+               // expected-note@-4 {{capability 'singleThreadExecutor' is traced from here}}
+    (std::function<void()>(func))(); // expected-warning {{calling function 'operator()' requires holding thread 'singleThreadExecutor' exclusively}} \
+                                     // expected-note@-6 {{capability 'singleThreadExecutor' is traced from here}}
+
     singleThreadExecutor->exec(func);
+    callbackExecutor->exec(func); // expected-warning {{argument of 'exec' requires 'singleThreadExecutor' capability}} \
+                                  // expected-note {{acquired capabilities: 'callbackExecutor'}}
 }
 
 void SomeClass::decrease() {
-    auto decreaseImpl = [this]() { // expected-note {{lambda implicitly requires thread 'singleThreadExecutor'}}
-        counter--; // expected-note {{... the thread was required for this statement}}
+    auto decreaseImpl = [this]() {
+        counter--;
         onCounterChanged();
     };
 
-    decreaseImpl(); // expected-warning {{values with capability 'singleThreadExecutor' are leaked to unsafe call 'SomeClass::decrease()::(anonymous class)::operator()'}}
+    decreaseImpl(); // expected-warning {{calling function 'operator()' requires holding thread 'singleThreadExecutor' exclusively}} \
+                    // expected-note@-4 {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
     singleThreadExecutor->exec(decreaseImpl);
 }
 
@@ -247,8 +263,7 @@ void SomeClass::touchCounter() {
         increaseImpl();
         counter--;
 
-        this->counterChanged(); // expected-warning {{attempt to take the second thread capability 'callbackExecutor'}} \
-                                // expected-note@-3 {{the first thread capability was 'singleThreadExecutor'}}
+        this->counterChanged(); // expected-warning {{reading variable 'counterChanged' requires holding thread 'callbackExecutor'}}
     };
 
     singleThreadExecutor->exec(touch);
@@ -257,15 +272,16 @@ void SomeClass::touchCounter() {
 void SomeClass::touchCounter2() {
   auto lambda1 = [this]() {
     this->callbackExecutor->assertInThread();
-    counter += 1; // expected-warning {{attempt to take the second thread capability 'singleThreadExecutor'}} \
-                  // expected-note@-1 {{the first thread capability was 'callbackExecutor'}}
+    counter += 1; // expected-warning {{writing variable 'counter' requires holding thread 'singleThreadExecutor' exclusively}}
   };
   (void) lambda1;
 
-  auto lambda2 = [this]() { // expected-note {{lambda implicitly requires thread 'singleThreadExecutor'}}
-    counter += 1; // expected-note {{... the thread was required for this statement}}
+  auto lambda2 = [this]() {
+    counter += 1;
   };
-  callbackExecutor->exec(lambda2); // expected-warning {{calling 'exec' acquires 'callbackExecutor' capability, but argument is associated with 'singleThreadExecutor' capability}}
+  callbackExecutor->exec(lambda2); // expected-warning {{argument of 'exec' requires 'singleThreadExecutor' capability}} \
+                                   // expected-note {{acquired capabilities: 'callbackExecutor'}} \
+                                   // expected-note@-2 {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
 }
 
 void SomeClass::callingGivenLambda(std::function<void()> lambda) {
@@ -274,7 +290,8 @@ void SomeClass::callingGivenLambda(std::function<void()> lambda) {
 
 void SomeClass::useCallingGivenLambda() {
   singleThreadExecutor->exec([this] {
-    callingGivenLambda([this] { counter++; });
+    callingGivenLambda([this] { counter++; }); // expected-warning {{functional object requiring thread 'singleThreadExecutor' loses its annotation by passing as argument to function call}} \
+                                               // expected-note {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
   });
 }
 
@@ -283,9 +300,9 @@ int SomeClass::get() const {
 }
 
 std::function<void()> SomeClass::getIncreaseImpl() {
-  return [this]() { // expected-warning {{values with capability 'singleThreadExecutor' are leaked to unsafe ReturnStmt}} \
-                    // expected-note {{lambda implicitly requires thread 'singleThreadExecutor'}}
-    increaseImpl(); // expected-note {{... the thread was required for this statement}}
+  return [this]() { // expected-warning {{functional object requiring thread 'singleThreadExecutor' loses its annotation by returning from function}} \
+                    // expected-note@+2 {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
+    increaseImpl();
   };
 }
 
@@ -328,7 +345,7 @@ public:
 
 class B : public A {
 public:
-  void foo() override REQUIRES_THREAD(*executor) {} // expected-warning {{virtual function requires lock 'executor', but its base method does not}}
+  void foo() override REQUIRES(*executor) {} // expected-warning {{virtual function requires lock 'executor', but its base method does not}}
 
 private:
   ThreadExecutor* executor;
@@ -338,7 +355,7 @@ class C {
 public:
   virtual ~C() = default;
 
-  virtual void foo() REQUIRES_THREAD(*executor1) {};
+  virtual void foo() REQUIRES(*executor1) {};
 
 protected:
   ThreadExecutor* executor1;
@@ -346,7 +363,7 @@ protected:
 
 class D : public C {
 public:
-  void foo() override REQUIRES_THREAD(*executor2) {} // todo: warning {{virtual function requires lock 'executor2', but its base method does not}}
+  void foo() override REQUIRES(*executor2) {} // todo: warning {{virtual function requires lock 'executor2', but its base method does not}}
 
 private:
   ThreadExecutor* executor2;
@@ -363,10 +380,8 @@ public:
   ThreadExecutor* executor1;
   ThreadExecutor* executor2;
 
-  int bar() __attribute__((requires_capability(*executor1, *executor2))) { return 1; }; // \
-      // expected-warning {{function cannot require several thread capabilities}}
-  int value __attribute__((guarded_by(*executor1))) __attribute__((guarded_by(*executor2))) = 1; // \
-      // expected-warning {{value cannot be guarded by several thread capabilities}}
+  int bar() REQUIRES(*executor1, *executor2) { return 1; };
+  int value GUARDED_BY(*executor1) GUARDED_BY(*executor2) = 1;
 
   void foo() {
     auto valuePtr = &A::bar;
@@ -397,11 +412,11 @@ public:
 
   void foo() {
     auto* valuePtr = &value;
-    *valuePtr = 4; // expected-warning {{values with capability 'executor1' are leaked to unsafe UnaryOperator}}
+    *valuePtr = 4; // todo: expected warning {{values with capability 'executor1' are leaked to unsafe UnaryOperator}}
 
     // todo: maybe warning about different capabilities?
-    Pair pair(&value, &value2); // expected-warning {{values with capability 'executor1' are leaked to unsafe object constructor 'local_var_following_many_threads::Pair'}} \
-        // expected-note@-4 {{capability is traced from here}}
+    Pair pair(&value, &value2); // todo: expected warning {{values with capability 'executor1' are leaked to unsafe object constructor 'local_var_following_many_threads::Pair'}} \
+        // todo: expected note@-4 {{capability is traced from here}}
   }
 };
 
@@ -418,7 +433,7 @@ public:
   std::function<void()> getValuePtr;
 
   void foo() {
-    getValuePtr = std::function<void()>([]() REQUIRES_THREAD(executor) {});
+    getValuePtr = std::function<void()>([]() REQUIRES(executor) {}); // todo: error?
   }
 };
 
@@ -435,35 +450,37 @@ public:
   int valueB GUARDED_BY(mB);
   int valueC GUARDED_BY(mC);
 
-  void forEachNumber(std::function<void(int)> pred) EXECUTE_IN_THREAD("*") {
+  void forEachNumber(std::function<void(int)> pred) EXECUTE_WITH_CAPABILITY("*") {
     for (int i = 0; i < 5; ++i) {
       pred(i);
     }
   }
 
-  void forEachNumber2(std::function<void(int)> pred) EXECUTE_IN_THREAD(mB, mC) {
+  void forEachNumber2(std::function<void(int)> pred) EXECUTE_WITH_CAPABILITY(mB, mC) {
     for (int i = 0; i < 5; ++i) {
       pred(i);
     }
   }
 
-  void forEachNumber3(std::function<void(int)> pred) EXECUTE_IN_THREAD(nullptr) {
+  void forEachNumber3(std::function<void(int)> pred) EXECUTE_WITH_CAPABILITY(nullptr) {
     for (int i = 0; i < 5; ++i) {
       pred(i);
     }
   }
 
   void testForEachNumber() {
-    auto lambda = [this](int a) EXCLUSIVE_LOCKS_REQUIRED(mA, mB) { valueA += a; valueB += a; };
+    auto lambda = [this](int a) REQUIRES(mA, mB) { valueA += a; valueB += a; };
 
-    forEachNumber(lambda); // warning
+    forEachNumber(lambda); // expected-warning {{argument of 'forEachNumber' requires 'mA' capability}}
 
     mA.Lock();
-    forEachNumber(lambda); // warning
+    forEachNumber(lambda); // expected-warning {{argument of 'forEachNumber' requires 'mB' capability}} \
+                           // expected-note {{acquired capabilities: 'mA'}}
 
     mA.Unlock();
     mB.Lock();
-    forEachNumber(lambda); // warning
+    forEachNumber(lambda); // expected-warning {{argument of 'forEachNumber' requires 'mA' capability}} \
+                           // expected-note {{acquired capabilities: 'mB'}}
 
     mA.Lock();
     forEachNumber(lambda); // ok
@@ -473,11 +490,12 @@ public:
   }
 
   void testForEachNumberWithFixedMutexes() {
-    forEachNumber2([this](int a) EXCLUSIVE_LOCKS_REQUIRED(mA, mC) { valueA++; valueC++; }); // warning
+    forEachNumber2([this](int a) REQUIRES(mA, mC) { valueA++; valueC++; }); // expected-warning {{argument of 'forEachNumber2' requires 'mA' capability}} \
+                                                                            // expected-note {{acquired capabilities: 'mB', 'mC'}}
 
-    forEachNumber2([this](int a) EXCLUSIVE_LOCKS_REQUIRED(mC, mB) { valueC++; valueB++; }); // ok
+    forEachNumber2([this](int a) REQUIRES(mC, mB) { valueC++; valueB++; }); // ok
 
-    forEachNumber3([this](int a) EXCLUSIVE_LOCKS_REQUIRED(mC, mB) { valueC++; valueB++; }); // warning
+    forEachNumber3([this](int a) REQUIRES(mC, mB) { valueC++; valueB++; }); // expected-warning {{argument of 'forEachNumber3' requires 'mC' capability}}
   }
 };
 

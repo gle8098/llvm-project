@@ -1635,9 +1635,9 @@ struct AnyRequiresAttr
       return {ReqAttr->args(), nullptr};
     } else {
       auto DynReqAttr = get<DynamicRequiresCapabilityAttr *>();
-      return {
-          llvm::make_range<Expr **>(&DynReqAttr->CapExpr, &DynReqAttr->CapExpr),
-          &DynReqAttr->Info};
+      return {llvm::make_range<Expr **>(&DynReqAttr->CapExpr,
+                                        &DynReqAttr->CapExpr + 1),
+              &DynReqAttr->Info};
     }
   }
 };
@@ -1766,9 +1766,6 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
                                         llvm::iterator_range<Expr **> &Args);
 
   void examineArgumentWithCapability(const FunctionDecl *FD, const Expr *Exp,
-                                     const Expr *ArgExp,
-                                     const TrackingCapability *Cap);
-  bool canAssumeSafePassTrackingData(const FunctionDecl *FD, const Expr *Exp,
                                      const Expr *ArgExp,
                                      const TrackingCapability *Cap);
 
@@ -2191,9 +2188,11 @@ void BuildLockset::handleCall(const Expr *Exp, const NamedDecl *D,
     }
   }
 
+  DynamicRequiresCapabilityAttr *CheckedDynRequiresCapAttr = nullptr;
   if (const auto *MethodD = dyn_cast<CXXMethodDecl>(D))
     if (auto I = Analyzer->GlobalDynamicRequires->find(MethodD);
         I != Analyzer->GlobalDynamicRequires->end()) {
+      CheckedDynRequiresCapAttr = I->getSecond().get();
       warnIfMutexNotHeld(D, Exp, AK_Written, I->getSecond()->CapExpr,
                          POK_FunctionCall, nullptr, Loc, std::nullopt,
                          &I->getSecond().get()->Info);
@@ -2208,6 +2207,10 @@ void BuildLockset::handleCall(const Expr *Exp, const NamedDecl *D,
         for (auto AnyReqAttr : TrackingCap->RequireAttrs) {
           if (AnyReqAttr.is<RequiresCapabilityAttr *>()) {
             auto A = AnyReqAttr.get<RequiresCapabilityAttr *>();
+            if (std::find(D->attr_begin(), D->attr_end(), A) != D->attr_end())
+              // already handled above by iterating over D->attrs()
+              continue;
+
             for (auto *Arg : A->args()) {
               warnIfMutexNotHeld(D, Exp, A->isShared() ? AK_Read : AK_Written,
                                  Arg, POK_FunctionCall, Self, Loc,
@@ -2215,6 +2218,10 @@ void BuildLockset::handleCall(const Expr *Exp, const NamedDecl *D,
             }
           } else {
             auto DynA = AnyReqAttr.get<DynamicRequiresCapabilityAttr *>();
+            if (DynA == CheckedDynRequiresCapAttr)
+              // already handled above from Analyzer->GlobalDynamicRequires
+              continue;
+
             warnIfMutexNotHeld(D, Exp, DynA->AK, DynA->CapExpr,
                                POK_FunctionCall, Self, Loc,
                                TrackingCap->OriginRange, &DynA->Info);
@@ -2405,7 +2412,10 @@ void BuildLockset::examineArgumentWithCapability(
 
     // Make acquired caps
     CapExprSet AcquiredCaps;
-    for (auto *ArgAttr : ExecuteWithCapAttrArgs) {
+    llvm::SmallVector<Expr *, 1> EmptyArgExpr(1, nullptr);
+    for (Expr *ArgAttr : ExecuteWithCapAttrArgs.empty()
+                             ? EmptyArgExpr
+                             : ExecuteWithCapAttrArgs) {
       if (auto *StringArg = dyn_cast_or_null<StringLiteral>(ArgAttr);
           StringArg && StringArg->getString() == "*") {
         for (auto FactID : FSet) {
@@ -2444,7 +2454,8 @@ void BuildLockset::examineArgumentWithCapability(
       if (!satisfied) {
         llvm::SmallVector<std::string> AcquiredCapNames;
         for (auto &Cap : AcquiredCaps)
-          AcquiredCapNames.push_back(Cap.toString());
+          if (!Cap.negative())
+            AcquiredCapNames.push_back(Cap.toString());
 
         Analyzer->Handler.handleExecWithCapabilityUnsatisfied(
             ArgExp->getBeginLoc(), CallExp->getMethodDecl(),
@@ -2452,25 +2463,9 @@ void BuildLockset::examineArgumentWithCapability(
         break;
       }
     }
-
-    // if (Cap->RequireAttrs.size() > 1) {
-    //   // ExecuteWithCapabilityAttr gives only one capability
-    //   if (CpThis.equals(CpExpected)) {
-    //     CpExpected =
-    //         TranslateRequiresAttr(Cap->RequireAttrs[1], Cap->AttachedDecl,
-    //                               nullptr, &FromDynamicRequires);
-    //   }
-    //   assert(!CpThis.equals(CpExpected));
-    // }
-
-    // if (!CpThis.equals(CpExpected)) {
-    //   Analyzer->Handler.handleExecWithMismatchedCap(
-    //       CallExp->getMethodDecl(), CpThis.toString(), CpExpected.toString(),
-    //       CallExp->getBeginLoc(), FromDynamicRequires);
-    // }
   } else if (isContainerLikeFunction(FD)) {
     AddTrackingData(TrackingPtr(Exp), Cap);
-  } else if (!canAssumeSafePassTrackingData(FD, Exp, ArgExp, Cap)) {
+  } else {
     StringRef CapKind;
     std::string CapName;
     DynamicRequiresAttrInfo *FromDynamicRequires = nullptr;
@@ -2481,60 +2476,6 @@ void BuildLockset::examineArgumentWithCapability(
           ArgExp->getSourceRange(), Cap->OriginRange, FromDynamicRequires);
     }
   }
-}
-
-bool BuildLockset::canAssumeSafePassTrackingData(
-    const FunctionDecl *FD, const Expr *Exp, const Expr *ArgExp,
-    const TrackingCapability *Cap) {
-  return false;
-  // todo: to leave or to delete?
-
-  if (Cap->RequireAttrs.size() != 1)
-    return false;
-
-  auto &ReqCapAttrAny = Cap->RequireAttrs.front();
-  Expr *MutexExp = nullptr;
-  AccessKind AK;
-  DynamicRequiresAttrInfo *FromDynamicAttr = nullptr;
-
-  if (ReqCapAttrAny.is<RequiresCapabilityAttr *>()) {
-    auto ReqCapAttr = ReqCapAttrAny.get<RequiresCapabilityAttr *>();
-    if (ReqCapAttr->args_size() != 1)
-      return false;
-    MutexExp = *ReqCapAttr->args_begin();
-    AK = ReqCapAttr->isShared() ? AK_Read : AK_Written;
-  } else {
-    auto ReqCapAttr = ReqCapAttrAny.get<DynamicRequiresCapabilityAttr *>();
-    MutexExp = ReqCapAttr->CapExpr;
-    AK = ReqCapAttr->AK;
-    FromDynamicAttr = &ReqCapAttr->Info;
-  }
-
-  CapabilityExpr Cp = Analyzer->SxBuilder.translateAttrExpr(
-      MutexExp, Cap->AttachedDecl, nullptr, nullptr);
-  if (Cp.isInvalid()) {
-    warnInvalidLock(Analyzer->Handler, MutexExp, Cap->AttachedDecl, Exp,
-                    Cp.getKind());
-    return false;
-  }
-
-  // to do or not to do?
-  if (Cp.getKind() != "thread") {
-    return false;
-  }
-
-  bool insertedDynAttr = false;
-  if (FSet.findLockUniv(Analyzer->FactMan, Cp)) {
-    insertedDynAttr = false;
-  } else if (insertDynamicAttr(Cp, MutexExp, AK, nullptr, Exp->getExprLoc())) {
-    insertedDynAttr = true;
-  } else {
-    return false;
-  }
-
-  Analyzer->Handler.handleAssumedCalledInAcquiredThread(
-      Cp.toString(), Exp->getBeginLoc(), insertedDynAttr, FromDynamicAttr);
-  return true;
 }
 
 void BuildLockset::VisitCallExpr(const CallExpr *Exp) {
