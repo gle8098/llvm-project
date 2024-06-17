@@ -1064,6 +1064,8 @@ class ThreadSafetyAnalyzer {
   DynamicRequiresAttributes* GlobalDynamicRequires;
   CapabilityExpr CurrentMethodDynamicRequiresAttr{};
 
+  bool TrackingCapabilitiesAllowed = false;
+
   BeforeSet *GlobalBeforeSet;
   llvm::SmallVector<StringRef> &CapabilityHolders;
   llvm::SmallVector<DetachedExecuteWithCapabilityAttr *>
@@ -1712,7 +1714,7 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
                  << '\n';
 #endif
 
-    if (!Analyzer->CurrentMethod->hasAttr<NoTrackingCapabilityAttr>())
+    if (Analyzer->TrackingCapabilitiesAllowed)
       TrackingData.insert({key, value});
   }
 
@@ -1741,10 +1743,10 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
 
   inline const Expr *getObjectArgument(const Expr *CallExp) {
     if (auto MCE = dyn_cast_or_null<CXXMemberCallExpr>(CallExp)) {
-      return MCE->getImplicitObjectArgument();
+      return UnpackTemporaryConstruction(MCE->getImplicitObjectArgument());
     }
     if (auto OC = dyn_cast_or_null<CXXOperatorCallExpr>(CallExp)) {
-      return OC->getArg(0);
+      return UnpackTemporaryConstruction(OC->getArg(0));
     }
     return nullptr;
   }
@@ -1779,6 +1781,10 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
                                  StringRef &CapKind,
                                  DynamicRequiresAttrInfo *&FromDynamicAttr);
 
+  void warnIfAccessableOutOfScope(const Expr *LHS,
+                                  const TrackingCapability *Cap,
+                                  const Expr *Exp);
+
 public:
   BuildLockset(ThreadSafetyAnalyzer *Anlzr, CFGBlockInfo &Info)
       : ConstStmtVisitor<BuildLockset>(), Analyzer(Anlzr), FSet(Info.EntrySet),
@@ -1792,6 +1798,7 @@ public:
   void VisitDeclStmt(const DeclStmt *S);
   void VisitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *Exp);
   void VisitCXXBindTemporaryExpr(const CXXBindTemporaryExpr *Exp);
+  void VisitCXXNewExpr(const CXXNewExpr *Exp);
 
   // Origins of tracking values
   void VisitDeclRefExpr(const DeclRefExpr *DRE);
@@ -2203,7 +2210,7 @@ void BuildLockset::handleCall(const Expr *Exp, const NamedDecl *D,
             FindTrackingData(getObjectArgument(CallExp))) {
       if (isa<CXXConversionDecl>(D))
         AddTrackingData(TrackingPtr(Exp), TrackingCap);
-      else
+      else {
         for (auto AnyReqAttr : TrackingCap->RequireAttrs) {
           if (AnyReqAttr.is<RequiresCapabilityAttr *>()) {
             auto A = AnyReqAttr.get<RequiresCapabilityAttr *>();
@@ -2227,6 +2234,7 @@ void BuildLockset::handleCall(const Expr *Exp, const NamedDecl *D,
                                TrackingCap->OriginRange, &DynA->Info);
           }
         }
+      }
     }
 
   // Remove locks first to allow lock upgrading/downgrading.
@@ -2303,18 +2311,27 @@ void BuildLockset::VisitUnaryOperator(const UnaryOperator *UO) {
 /// whether we hold any required mutexes.
 /// FIXME: Deal with non-primitive types.
 void BuildLockset::VisitBinaryOperator(const BinaryOperator *BO) {
-  if (FindTrackingData(BO->getLHS()) || FindTrackingData(BO->getRHS())) {
-    Analyzer->Handler.handleTrackingValuesModelFailure(
-        BO, "BinaryOperator is not supported yet", BO->getBeginLoc());
-  }
+  const auto *RHSCap = FindTrackingData(BO->getRHS());
 
-  if (!BO->isAssignmentOp())
+  if (!BO->isAssignmentOp()) {
+    if (RHSCap || FindTrackingData(BO->getLHS())) {
+      Analyzer->Handler.handleTrackingValuesModelFailure(
+          BO, "non-assignment BinaryOperator is not supported yet",
+          BO->getBeginLoc());
+    }
+
     return;
+  }
 
   // adjust the context
   LVarCtx = Analyzer->LocalVarMap.getNextContext(CtxIndex, BO, LVarCtx);
 
   checkAccess(BO->getLHS(), AK_Written);
+
+  if (RHSCap) {
+    warnIfAccessableOutOfScope(UnpackTemporaryConstruction(BO->getLHS()),
+                               RHSCap, BO);
+  }
 }
 
 /// Whenever we do an LValue to Rvalue cast, we are reading a variable and
@@ -2465,6 +2482,8 @@ void BuildLockset::examineArgumentWithCapability(
     }
   } else if (isContainerLikeFunction(FD)) {
     AddTrackingData(TrackingPtr(Exp), Cap);
+    if (auto *Obj = getObjectArgument(Exp))
+      warnIfAccessableOutOfScope(Obj, Cap, Exp);
   } else {
     StringRef CapKind;
     std::string CapName;
@@ -2502,44 +2521,48 @@ void BuildLockset::VisitCallExpr(const CallExpr *Exp) {
     ObjectArgument = OE->getArg(0);
     OverloadedOperatorKind OEop = OE->getOperator();
     switch (OEop) {
-      case OO_Equal:
-      case OO_PlusEqual:
-      case OO_MinusEqual:
-      case OO_StarEqual:
-      case OO_SlashEqual:
-      case OO_PercentEqual:
-      case OO_CaretEqual:
-      case OO_AmpEqual:
-      case OO_PipeEqual:
-      case OO_LessLessEqual:
-      case OO_GreaterGreaterEqual:
-        checkAccess(OE->getArg(1), AK_Read);
-        [[fallthrough]];
-      case OO_PlusPlus:
-      case OO_MinusMinus:
-        checkAccess(OE->getArg(0), AK_Written);
-        break;
-      case OO_Star:
-      case OO_ArrowStar:
-      case OO_Arrow:
-      case OO_Subscript:
-        if (!(OEop == OO_Star && OE->getNumArgs() > 1)) {
-          // Grrr.  operator* can be multiplication...
-          checkPtAccess(OE->getArg(0), AK_Read);
-        }
-        [[fallthrough]];
-      default: {
-        // TODO: get rid of this, and rely on pass-by-ref instead.
-        const Expr *Obj = OE->getArg(0);
-        checkAccess(Obj, AK_Read);
-        // Check the remaining arguments. For method operators, the first
-        // argument is the implicit self argument, and doesn't appear in the
-        // FunctionDecl, but for non-methods it does.
-        const FunctionDecl *FD = OE->getDirectCallee();
-        examineArguments(FD, Exp, std::next(OE->arg_begin()), OE->arg_end(),
-                         /*SkipFirstParam*/ !isa<CXXMethodDecl>(FD));
-        break;
+    case OO_Equal:
+      if (auto *Cap = FindTrackingData(OE->getArg(1)))
+        if (auto *FD = OE->getDirectCallee())
+          examineArgumentWithCapability(FD, OE, OE->getArg(1), Cap);
+      [[fallthrough]];
+    case OO_PlusEqual:
+    case OO_MinusEqual:
+    case OO_StarEqual:
+    case OO_SlashEqual:
+    case OO_PercentEqual:
+    case OO_CaretEqual:
+    case OO_AmpEqual:
+    case OO_PipeEqual:
+    case OO_LessLessEqual:
+    case OO_GreaterGreaterEqual:
+      checkAccess(OE->getArg(1), AK_Read);
+      [[fallthrough]];
+    case OO_PlusPlus:
+    case OO_MinusMinus:
+      checkAccess(OE->getArg(0), AK_Written);
+      break;
+    case OO_Star:
+    case OO_ArrowStar:
+    case OO_Arrow:
+    case OO_Subscript:
+      if (!(OEop == OO_Star && OE->getNumArgs() > 1)) {
+        // Grrr.  operator* can be multiplication...
+        checkPtAccess(OE->getArg(0), AK_Read);
       }
+      [[fallthrough]];
+    default: {
+      // TODO: get rid of this, and rely on pass-by-ref instead.
+      const Expr *Obj = OE->getArg(0);
+      checkAccess(Obj, AK_Read);
+      // Check the remaining arguments. For method operators, the first
+      // argument is the implicit self argument, and doesn't appear in the
+      // FunctionDecl, but for non-methods it does.
+      const FunctionDecl *FD = OE->getDirectCallee();
+      examineArguments(FD, Exp, std::next(OE->arg_begin()), OE->arg_end(),
+                       /*SkipFirstParam*/ !isa<CXXMethodDecl>(FD));
+      break;
+    }
     }
   } else {
     examineArguments(Exp->getDirectCallee(), Exp, Exp->arg_begin(),
@@ -2561,7 +2584,7 @@ void BuildLockset::VisitCXXConstructExpr(const CXXConstructExpr *Exp) {
     // Handling args tracking data is implemented in examineArguments, but here
     // we don't call it
     if (auto Cap = FindTrackingData(Source))
-      AddTrackingData(Exp, Cap);
+      examineArgumentWithCapability(D, Exp, Source, Cap);
   } else {
     examineArguments(D, Exp, Exp->arg_begin(), Exp->arg_end());
   }
@@ -2614,9 +2637,14 @@ void BuildLockset::VisitMaterializeTemporaryExpr(
 
 void BuildLockset::VisitCXXBindTemporaryExpr(const CXXBindTemporaryExpr *Exp) {
   auto *SubExpr = Exp->getSubExpr();
-  if (auto Cap = FindTrackingData(SubExpr)) {
+  if (auto Cap = FindTrackingData(SubExpr))
     AddTrackingData(Exp, Cap);
-  }
+}
+
+void BuildLockset::VisitCXXNewExpr(const CXXNewExpr *Exp) {
+  auto *SubExpr = Exp->getConstructExpr();
+  if (auto Cap = FindTrackingData(SubExpr))
+    AddTrackingData(Exp, Cap);
 }
 
 TrackingCapability *
@@ -2684,6 +2712,28 @@ bool BuildLockset::GetOutputInfoForFirstAttr(
     CapKind = Capabilities.front().getKind();
     FromDynamicAttr = FromDynamicAttrTmp;
     return true;
+  }
+}
+
+void BuildLockset::warnIfAccessableOutOfScope(const Expr *LHS,
+                                              const TrackingCapability *Cap,
+                                              const Expr *Exp) {
+  if (auto *ME = dyn_cast<MemberExpr>(LHS)) {
+    StringRef CapKind;
+    std::string CapName;
+    DynamicRequiresAttrInfo *FromDynamicRequires = nullptr;
+    if (GetOutputInfoForFirstAttr(*Cap, nullptr, CapName, CapKind,
+                                  FromDynamicRequires)) {
+      Analyzer->Handler.handleFunctionalObjectLosesRequiresAttr(
+          CapKind, CapName, VLAK_ByAssigningToField, LHS->getSourceRange(),
+          Cap->OriginRange, FromDynamicRequires);
+    }
+  } else if (auto *DRE = dyn_cast<DeclRefExpr>(LHS)) {
+    AddTrackingData(DRE->getDecl(), Cap);
+  } else {
+    Analyzer->Handler.handleTrackingValuesModelFailure(
+        Exp, "too complex LHS expression for scope detection",
+        LHS->getExprLoc());
   }
 }
 
@@ -2884,6 +2934,7 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
 
   if (D->hasAttr<NoThreadSafetyAnalysisAttr>())
     return;
+  TrackingCapabilitiesAllowed = !D->hasAttr<NoTrackingCapabilityAttr>();
 
   // FIXME: Do something a bit more intelligent inside constructor and
   // destructor code.  Constructors and destructors must assume unique access

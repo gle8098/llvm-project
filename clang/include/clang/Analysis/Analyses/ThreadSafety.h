@@ -98,6 +98,7 @@ enum ValueLosesAnnotationKind {
   VLAK_Unspecified,
   VLAK_ByReturning,
   VLAK_ByPassingAsArgument,
+  VLAK_ByAssigningToField,
 };
 
 // todo: description

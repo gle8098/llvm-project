@@ -3869,7 +3869,7 @@ def note_first_thread_capability_acquired :
 // Thread safety warnings related to values tracking
 def warn_tracking_functional_object_going_out_of_scope :
   Warning<"functional object requiring %0 '%1' loses its annotation"
-  "%select{| by returning from function| by passing as argument to function call}2">,
+  "%select{| by returning from function| by passing as argument to function call| by assigning to field}2">,
   InGroup<ThreadSafetySTE>, DefaultIgnore;
 def note_capability_traced_from_here :
   Note<"capability '%0' is traced from here">;

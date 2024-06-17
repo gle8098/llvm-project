@@ -431,9 +431,22 @@ public:
   ThreadExecutor* executor;
 
   std::function<void()> getValuePtr;
+  void (*getValuePtr2)() = nullptr;
 
   void foo() {
-    getValuePtr = std::function<void()>([]() REQUIRES(executor) {}); // todo: error?
+    std::function<void()> getValueLTmp = []() REQUIRES(executor) {};
+    getValuePtr = getValueLTmp; // expected-warning {{functional object requiring thread 'executor' loses its annotation by passing as argument to function call}} \
+                                // expected-note@-1 {{capability 'executor' is traced from here}}
+    getValuePtr = std::function<void()>([]() REQUIRES(executor) {}); // expected-warning {{functional object requiring thread 'executor' loses its annotation by passing as argument to function call}}
+
+    void (*getValuePtrTmp)() = nullptr;
+    getValuePtrTmp = []() REQUIRES(executor) {};
+    getValuePtr2 = []() REQUIRES(executor) {}; // expected-warning {{functional object requiring thread 'executor' loses its annotation by assigning to field}} \
+                                               // expected-note@-1 {{capability 'executor' is traced from here}}
+    getValuePtr2 = getValuePtrTmp; // expected-warning {{functional object requiring thread 'executor' loses its annotation by assigning to field}} \
+                                   // expected-note@-2 {{capability 'executor' is traced from here}}
+
+    new std::function<void()>([]() REQUIRES(executor) {});
   }
 };
 
