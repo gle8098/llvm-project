@@ -513,3 +513,46 @@ public:
 };
 
 }
+
+//=============================================================================
+
+namespace explicit_cast {
+
+Mutex m;
+void foo() REQUIRES(m) {}
+void bar() {
+  static_cast<void (*)()>(&foo)(); // expected-warning {{}}
+}
+
+}
+
+//=============================================================================
+
+namespace conditional_capability {
+
+Mutex m;
+bool condition();
+void foo() REQUIRES(!m) {}
+void fooLocked() REQUIRES(m) {}
+void bar() {
+  void (*fooPtr)() = nullptr;
+  if (condition()) {
+    fooPtr = &foo; // expected-warning {{statement DeclRefExpr does not fit into tracking values model (second tracking capability)}}
+  } else {
+    fooPtr = &fooLocked;
+  }
+  fooPtr();
+}
+void bar_loop() {
+  void (*fooPtr)() = nullptr;
+  while (condition()) {
+    if (condition()) {
+      fooPtr = &foo; // expected-warning {{statement DeclRefExpr does not fit into tracking values model (second tracking capability)}}
+    } else {
+      fooPtr = &fooLocked;
+    }
+  }
+  fooPtr();
+}
+
+}

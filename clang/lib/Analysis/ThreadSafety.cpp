@@ -1041,6 +1041,45 @@ private:
   }
 };
 
+struct AnyRequiresAttr
+    : public llvm::PointerUnion<RequiresCapabilityAttr *,
+                                DynamicRequiresCapabilityAttr *> {
+  using llvm::PointerUnion<RequiresCapabilityAttr *,
+                           DynamicRequiresCapabilityAttr *>::PointerUnion;
+
+  std::pair<llvm::iterator_range<Expr **>, DynamicRequiresAttrInfo *> Unpack() {
+    if (is<RequiresCapabilityAttr *>()) {
+      auto ReqAttr = get<RequiresCapabilityAttr *>();
+      assert(ReqAttr->args_size() > 0);
+      return {ReqAttr->args(), nullptr};
+    } else {
+      auto DynReqAttr = get<DynamicRequiresCapabilityAttr *>();
+      return {llvm::make_range<Expr **>(&DynReqAttr->CapExpr,
+                                        &DynReqAttr->CapExpr + 1),
+              &DynReqAttr->Info};
+    }
+  }
+};
+
+struct TrackingCapability {
+  llvm::SmallVector<AnyRequiresAttr, 4> RequireAttrs;
+  const ValueDecl *AttachedDecl;
+  SourceRange OriginRange;
+
+  TrackingCapability(llvm::SmallVector<AnyRequiresAttr, 4> RequireAttrs,
+                     const ValueDecl *AttachedDecl, SourceRange OriginRange)
+      : RequireAttrs(std::move(RequireAttrs)), AttachedDecl(AttachedDecl),
+        OriginRange(OriginRange) {
+    assert(!this->RequireAttrs.empty());
+  }
+
+  bool operator==(const TrackingCapability &rhs) const {
+    return AttachedDecl == rhs.AttachedDecl && RequireAttrs == rhs.RequireAttrs;
+  }
+};
+
+using TrackingPtr = llvm::PointerUnion<const Stmt *, const ValueDecl *>;
+
 /// Class which implements the core thread safety analysis routines.
 class ThreadSafetyAnalyzer {
   friend class BuildLockset;
@@ -1065,6 +1104,8 @@ class ThreadSafetyAnalyzer {
   CapabilityExpr CurrentMethodDynamicRequiresAttr{};
 
   bool TrackingCapabilitiesAllowed = false;
+  llvm::DenseMap<TrackingPtr, const TrackingCapability *> TrackingData;
+  llvm::BumpPtrAllocator TrackingDataArena;
 
   BeforeSet *GlobalBeforeSet;
   llvm::SmallVector<StringRef> &CapabilityHolders;
@@ -1624,39 +1665,6 @@ static const Expr *UnpackTemporaryConstruction(const Expr *E) {
   return E;
 }
 
-struct AnyRequiresAttr
-    : public llvm::PointerUnion<RequiresCapabilityAttr *,
-                                DynamicRequiresCapabilityAttr *> {
-  using llvm::PointerUnion<RequiresCapabilityAttr *,
-                           DynamicRequiresCapabilityAttr *>::PointerUnion;
-
-  std::pair<llvm::iterator_range<Expr **>, DynamicRequiresAttrInfo *> Unpack() {
-    if (is<RequiresCapabilityAttr *>()) {
-      auto ReqAttr = get<RequiresCapabilityAttr *>();
-      assert(ReqAttr->args_size() > 0);
-      return {ReqAttr->args(), nullptr};
-    } else {
-      auto DynReqAttr = get<DynamicRequiresCapabilityAttr *>();
-      return {llvm::make_range<Expr **>(&DynReqAttr->CapExpr,
-                                        &DynReqAttr->CapExpr + 1),
-              &DynReqAttr->Info};
-    }
-  }
-};
-
-struct TrackingCapability {
-  llvm::SmallVector<AnyRequiresAttr, 4> RequireAttrs;
-  const ValueDecl *AttachedDecl;
-  SourceRange OriginRange;
-
-  TrackingCapability(llvm::SmallVector<AnyRequiresAttr, 4> RequireAttrs,
-                     const ValueDecl *AttachedDecl, SourceRange OriginRange)
-      : RequireAttrs(std::move(RequireAttrs)), AttachedDecl(AttachedDecl),
-        OriginRange(OriginRange) {
-    assert(!this->RequireAttrs.empty());
-  }
-};
-
 /// We use this class to visit different types of expressions in
 /// CFGBlocks, and build up the lockset.
 /// An expression may cause us to add or remove locks from the lockset, or else
@@ -1672,10 +1680,6 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
   llvm::SmallDenseMap<const Expr *, til::LiteralPtr *> ConstructedObjects;
   LocalVariableMap::Context LVarCtx;
   unsigned CtxIndex;
-
-  using TrackingPtr = llvm::PointerUnion<const Stmt *, const ValueDecl *>;
-  llvm::DenseMap<TrackingPtr, const TrackingCapability *> TrackingData;
-  llvm::BumpPtrAllocator TrackingDataArena;
 
   // helper functions
   bool insertDynamicAttr(const CapabilityExpr &Cp, Expr *MutexExp,
@@ -1703,19 +1707,28 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
                         bool SkipFirstParam = false);
 
   // helpers for tracking values
-  inline void AddTrackingData(TrackingPtr key,
-                              const TrackingCapability *value) {
+  inline void AddTrackingData(TrackingPtr key, const TrackingCapability *value,
+                              const Stmt *origin = nullptr) {
 #ifdef PRINT_DEBUG_LOGS
-    llvm::errs() << "TrackingData: "
-                 << (key.is<const Stmt *>()
-                         ? key.get<const Stmt *>()->getStmtClassName()
-                         : key.get<const ValueDecl *>()->getDeclKindName())
-                 << ' ' << value->AttachedDecl->getQualifiedNameAsString()
-                 << '\n';
+    llvm::errs()
+        << "TrackingData: "
+        << (key.is<const Stmt *>()
+                ? key.get<const Stmt *>()->getStmtClassName()
+                : key.get<const ValueDecl *>()->getDeclName().getAsString())
+        << ' ' << value->AttachedDecl->getQualifiedNameAsString() << '\n';
 #endif
 
-    if (Analyzer->TrackingCapabilitiesAllowed)
-      TrackingData.insert({key, value});
+    if (Analyzer->TrackingCapabilitiesAllowed) {
+      auto [it, newValue] = Analyzer->TrackingData.insert({key, value});
+
+      if (!newValue && it->second != value) {
+        if (key.is<const Stmt *>() && !origin)
+          origin = key.get<const Stmt *>();
+        assert(origin);
+        Analyzer->Handler.handleTrackingValuesModelFailure(
+            origin, "second tracking capability", origin->getBeginLoc());
+      }
+    }
   }
 
   inline const TrackingCapability *FindTrackingData(const Stmt *key) {
@@ -1723,15 +1736,15 @@ class BuildLockset : public ConstStmtVisitor<BuildLockset> {
       return nullptr;
     if (auto *KeyExpr = dyn_cast_or_null<Expr>(key))
       key = UnpackTemporaryConstruction(KeyExpr);
-    auto I = TrackingData.find(key);
-    return (I != TrackingData.end()) ? I->getSecond() : nullptr;
+    auto I = Analyzer->TrackingData.find(key);
+    return (I != Analyzer->TrackingData.end()) ? I->getSecond() : nullptr;
   }
 
   inline const TrackingCapability *FindTrackingData(const ValueDecl *key) {
     if (key == nullptr)
       return nullptr;
-    auto I = TrackingData.find(key);
-    return (I != TrackingData.end()) ? I->getSecond() : nullptr;
+    auto I = Analyzer->TrackingData.find(key);
+    return (I != Analyzer->TrackingData.end()) ? I->getSecond() : nullptr;
   }
 
   inline const DynamicRequiresAttrInfo *
@@ -2612,7 +2625,7 @@ void BuildLockset::VisitDeclStmt(const DeclStmt *S) {
       }
 
       if (const TrackingCapability *Cap = FindTrackingData(E)) {
-        AddTrackingData(VD, Cap);
+        AddTrackingData(VD, Cap, S);
       }
     }
   }
@@ -2670,7 +2683,7 @@ BuildLockset::FindRequiresCapabilityFromDecl(const ValueDecl *Decl,
     return nullptr;
   }
 
-  return new (TrackingDataArena)
+  return new (Analyzer->TrackingDataArena)
       TrackingCapability(std::move(RequireAttrs), Decl, Exp->getSourceRange());
 }
 
@@ -2729,7 +2742,7 @@ void BuildLockset::warnIfAccessableOutOfScope(const Expr *LHS,
           Cap->OriginRange, FromDynamicRequires);
     }
   } else if (auto *DRE = dyn_cast<DeclRefExpr>(LHS)) {
-    AddTrackingData(DRE->getDecl(), Cap);
+    AddTrackingData(DRE->getDecl(), Cap, DRE);
   } else {
     Analyzer->Handler.handleTrackingValuesModelFailure(
         Exp, "too complex LHS expression for scope detection",
@@ -2795,7 +2808,7 @@ void BuildLockset::VisitReturnStmt(const ReturnStmt *RetS) {
 
 void BuildLockset::VisitStmt(const Stmt *S) {
   for (const Stmt *ChildStmt : S->children()) {
-    if (TrackingData.contains(ChildStmt)) {
+    if (Analyzer->TrackingData.contains(ChildStmt)) {
       Analyzer->Handler.handleTrackingValuesModelFailure(
           S, "unsupported for tracking", S->getBeginLoc());
     }
