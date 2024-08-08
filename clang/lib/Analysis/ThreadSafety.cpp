@@ -1892,6 +1892,14 @@ void BuildLockset::warnIfMutexNotHeld(
     return;
   }
 
+#ifdef PRINT_DEBUG_LOGS
+  llvm::errs() << "warnIfMutexNotHeld on " << Cp.toString() << " FSet:";
+  for (auto FactID : FSet) {
+    llvm::errs() << " " << Analyzer->FactMan[FactID].toString();
+  }
+  llvm::errs() << '\n';
+#endif
+
   if (Cp.negative()) {
     // Negative capabilities act like locks excluded
     const FactEntry *LDat = FSet.findLock(Analyzer->FactMan, !Cp);
@@ -1903,7 +1911,9 @@ void BuildLockset::warnIfMutexNotHeld(
 
     // If this does not refer to a negative capability in the same class,
     // then stop here.
-    if (!Analyzer->inCurrentScope(Cp))
+    // However, if current method is a supported lambda, insert dynamic attr.
+    if (!Analyzer->inCurrentScope(Cp) &&
+        !insertDynamicAttr(Cp, MutexExp, AK, Self, Loc))
       return;
 
     // Otherwise the negative requirement must be propagated to the caller.
@@ -1959,6 +1969,14 @@ void BuildLockset::warnIfMutexHeld(const NamedDecl *D, const Expr *Exp,
   } else if (Cp.shouldIgnore()) {
     return;
   }
+
+#ifdef PRINT_DEBUG_LOGS
+  llvm::errs() << "warnIfMutexHeld on (not) " << Cp.toString() << " FSet:";
+  for (auto FactID : FSet) {
+    llvm::errs() << " " << Analyzer->FactMan[FactID].toString();
+  }
+  llvm::errs() << '\n';
+#endif
 
   const FactEntry *LDat = FSet.findLock(Analyzer->FactMan, Cp);
   if (LDat) {

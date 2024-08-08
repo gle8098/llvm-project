@@ -100,6 +100,11 @@ static StringRef ClassifyDiagnostic(QualType VDT) {
   } else if (VDT->isPointerType() || VDT->isReferenceType())
     return ClassifyDiagnostic(VDT->getPointeeType());
 
+  if (!VDT.isCanonical()) {
+    // Try unfolding typedefs...
+    return ClassifyDiagnostic(VDT.getCanonicalType());
+  }
+
   return "mutex";
 }
 
@@ -191,6 +196,8 @@ CapabilityExpr SExprBuilder::translateAttrExpr(const Expr *AttrExp,
     if (UO->getOpcode() == UO_LNot) {
       Neg = true;
       AttrExp = UO->getSubExpr();
+      if (auto CE = dyn_cast_or_null<CastExpr>(AttrExp))
+        AttrExp = CE->getSubExpr();
     }
   }
 

@@ -106,6 +106,26 @@ public:
 
 //=============================================================================
 
+namespace {
+
+template <typename T>
+class unique_ptr {
+public:
+    typedef T* pointer;
+
+    T* ptr = nullptr;
+
+    pointer get() { return ptr; }
+    T* get_no_typedef() { return ptr; }
+
+    const T *operator->() const { return ptr; }
+    T *operator->() { return ptr; }
+};
+
+}
+
+//=============================================================================
+
 class TaskCallerContext {
 public:
   int dummyValue = 1;
@@ -554,5 +574,34 @@ void bar_loop() {
   }
   fooPtr();
 }
+
+}
+
+//=============================================================================
+
+namespace negative_caps {
+
+class Testing {
+
+void special() REQUIRES(!executor_.get());
+
+void foo() {
+    executor_.get()->exec([this] { // expected-warning {{argument of 'exec' requires '!executor_' capability}} \
+                                   // expected-note {{acquired capabilities: 'executor_'}}
+        special(); // expected-note {{lambda implicitly requires thread '!executor_' for this statement}}
+    });
+
+    special(); // expected-warning {{calling function 'special' requires negative capability '!executor_'}}
+    executor_->assertInThread();
+    special(); // expected-warning {{cannot call function 'special' while thread 'executor_' is held}}
+}
+
+void foo2() REQUIRES(!executor_.get()) {
+    special();
+}
+
+unique_ptr<ThreadExecutor> executor_;
+
+};
 
 }
