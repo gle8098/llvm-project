@@ -120,6 +120,9 @@ public:
 
     const T *operator->() const { return ptr; }
     T *operator->() { return ptr; }
+
+    const T *operator*() const { return ptr; }
+    T *operator*() { return ptr; }
 };
 
 }
@@ -585,6 +588,8 @@ class Testing {
 
 void special() REQUIRES(!executor_.get());
 
+void special_not() REQUIRES(executor_);
+
 void foo() {
     executor_.get()->exec([this] { // expected-warning {{argument of 'exec' requires '!executor_' capability}} \
                                    // expected-note {{acquired capabilities: 'executor_'}}
@@ -600,7 +605,37 @@ void foo2() REQUIRES(!executor_.get()) {
     special();
 }
 
+void foo3() REQUIRES(!executor_.get()) REQUIRES(executor_.get()) {
+    special_not(); // expected-warning {{}}
+}
+
+void foo4() REQUIRES(!executor_.get()) REQUIRES(*executor_) {
+    special_not(); // expected-warning {{}}
+}
+
 unique_ptr<ThreadExecutor> executor_;
+
+};
+
+}
+
+//=============================================================================
+
+namespace smart_pointer_as_capability {
+
+class CAPABILITY("some_cap") my_unique_ptr : public unique_ptr<int> {};
+
+class Testing {
+
+void foo() {
+  some_value++; // expected-warning {{writing variable 'some_value' requires holding thread 'executor_' exclusively}}
+  some_value_2++; // expected-warning {{writing variable 'some_value_2' requires holding some_cap 'some_lock' exclusively}}
+}
+
+unique_ptr<ThreadExecutor> executor_;
+my_unique_ptr some_lock;
+int some_value GUARDED_BY(executor_);
+int some_value_2 GUARDED_BY(some_lock);
 
 };
 

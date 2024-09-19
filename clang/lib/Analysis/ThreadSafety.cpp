@@ -1156,26 +1156,6 @@ public:
   }
 
   void runAnalysis(AnalysisDeclContext &AC);
-
-  // private:
-  //   // todo: remove this
-  //   DiagnosticBuilder Diag(SourceLocation Loc, StringRef Description,
-  //                          DiagnosticIDs::Level Level =
-  //                          DiagnosticIDs::Warning) {
-  //     assert(Loc.isValid());
-  //     auto &DiagEngine = *Handler.getDiagnosticsEngine();
-  //     assert(Handler.getDiagnosticsEngine());
-
-  //     unsigned ID = DiagEngine.getDiagnosticIDs()->getCustomDiagID(
-  //         Level, Description.str());
-  //     return DiagEngine.Report(Loc, ID);
-  //   }
-
-  //   // todo: remove
-  //   bool DiagVerbose(SourceLocation Loc) {
-  //     return !Handler.getDiagnosticsEngine()->isIgnored(
-  //         diag::warn_thread_safety_verbose, Loc);
-  //   }
 };
 
 } // namespace
