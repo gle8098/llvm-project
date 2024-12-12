@@ -2751,7 +2751,7 @@ bool BuildLockset::GetOutputInfoForFirstAttr(
 void BuildLockset::warnIfAccessableOutOfScope(const Expr *LHS,
                                               const TrackingCapability *Cap,
                                               const Expr *Exp) {
-  if (auto *ME = dyn_cast<MemberExpr>(LHS)) {
+  if (isa<MemberExpr>(LHS)) {
     StringRef CapKind;
     std::string CapName;
     DynamicRequiresAttrInfo *FromDynamicRequires = nullptr;
