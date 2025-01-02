@@ -285,10 +285,6 @@ public:
   virtual void handleTrackingValuesModelFailure(const Stmt *S, Name Description,
                                                 SourceLocation Loc) {}
 
-  virtual void handleAssumedCalledInAcquiredThread(
-      Name LockName, SourceLocation Loc, bool insertedDynamicAttr,
-      const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
-
   /// Called by the analysis when starting analysis of a function.
   /// Used to issue suggestions for changes to annotations.
   virtual void enterFunction(const FunctionDecl *FD) {}

@@ -2171,20 +2171,6 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
-  virtual void handleAssumedCalledInAcquiredThread(
-      Name LockName, SourceLocation Loc, bool insertedDynamicAttr,
-      const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
-    PartialDiagnosticAt Warning(
-        Loc, S.PDiag(diag::warn_assumed_called_in_acquired_thread)
-                 << LockName << (insertedDynamicAttr ? 1 : 0));
-
-    OptionalNotes Notes;
-    pushDynamicAttrNote(Notes, DynamicRequiresAttr);
-    pushVerboseNote(Notes);
-
-    Warnings.emplace_back(std::move(Warning), std::move(Notes));
-  }
-
   void enterFunction(const FunctionDecl* FD) override {
     CurrentFunction = FD;
   }

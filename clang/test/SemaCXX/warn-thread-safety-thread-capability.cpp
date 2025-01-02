@@ -40,6 +40,7 @@
 
 DETACHED_CAPABILITY_HOLDER("std::function")
 DETACHED_CAPABILITY_HOLDER("std::bind")
+DETACHED_CAPABILITY_HOLDER("std::move")
 
 //=============================================================================
 
@@ -101,6 +102,12 @@ public:
         return this->invoke_f();
     }
 };
+
+// simple std::move without remove_reference<T>
+template<typename T>
+[[nodiscard]] constexpr T&& move(T&& __t) noexcept {
+  return static_cast<T&&>(__t);
+}
 
 }
 
@@ -305,6 +312,10 @@ void SomeClass::touchCounter2() {
   callbackExecutor->exec(lambda2); // expected-warning {{argument of 'exec' requires 'singleThreadExecutor' capability}} \
                                    // expected-note {{acquired capabilities: 'callbackExecutor'}} \
                                    // expected-note@-2 {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
+
+  callbackExecutor->exec(std::move(lambda2)); // expected-warning {{argument of 'exec' requires 'singleThreadExecutor' capability}} \
+                                   // expected-note {{acquired capabilities: 'callbackExecutor'}} \
+                                   // expected-note@-6 {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
 }
 
 void SomeClass::callingGivenLambda(std::function<void()> lambda) {
@@ -449,6 +460,8 @@ public:
 
 namespace model_failure {
 
+void (*getValuePtrGlobal)() = nullptr;
+
 class A {
 public:
   ThreadExecutor* executor;
@@ -461,15 +474,23 @@ public:
     getValuePtr = getValueLTmp; // expected-warning {{functional object requiring thread 'executor' loses its annotation by passing as argument to function call}} \
                                 // expected-note@-1 {{capability 'executor' is traced from here}}
     getValuePtr = std::function<void()>([]() REQUIRES(executor) {}); // expected-warning {{functional object requiring thread 'executor' loses its annotation by passing as argument to function call}}
+  }
 
+  void bar() {
     void (*getValuePtrTmp)() = nullptr;
     getValuePtrTmp = []() REQUIRES(executor) {};
     getValuePtr2 = []() REQUIRES(executor) {}; // expected-warning {{functional object requiring thread 'executor' loses its annotation by assigning to field}} \
                                                // expected-note@-1 {{capability 'executor' is traced from here}}
     getValuePtr2 = getValuePtrTmp; // expected-warning {{functional object requiring thread 'executor' loses its annotation by assigning to field}} \
                                    // expected-note@-2 {{capability 'executor' is traced from here}}
+    getValuePtrGlobal = getValuePtrTmp; // expected-warning {{functional object requiring thread 'executor' loses its annotation by assigning to field}} \
+                                        // expected-note@-5 {{capability 'executor' is traced from here}}
+  }
 
-    new std::function<void()>([]() REQUIRES(executor) {});
+  void bar2() {
+    auto value = new std::function<void()>([]() REQUIRES(executor) {});
+    (*value)(); // expected-warning {{calling function 'operator()' requires holding thread 'executor' exclusively}} \
+                // expected-note@-1 {{capability 'executor' is traced from here}}
   }
 };
 
@@ -544,7 +565,8 @@ namespace explicit_cast {
 Mutex m;
 void foo() REQUIRES(m) {}
 void bar() {
-  static_cast<void (*)()>(&foo)(); // expected-warning {{}}
+  static_cast<void (*)()>(&foo)(); // expected-warning {{calling function 'foo' requires holding mutex 'm' exclusively}} \
+                                   // expected-note {{capability 'm' is traced from here}}
 }
 
 }
@@ -606,11 +628,19 @@ void foo2() REQUIRES(!executor_.get()) {
 }
 
 void foo3() REQUIRES(!executor_.get()) REQUIRES(executor_.get()) {
-    special_not(); // expected-warning {{}}
+    special_not(); // expected-warning {{calling function 'special_not' requires negative capability '!executor_'}}
 }
 
-void foo4() REQUIRES(!executor_.get()) REQUIRES(*executor_) {
-    special_not(); // expected-warning {{}}
+void foo4() REQUIRES(!executor_.get()) REQUIRES(executor_) {
+    special_not(); // expected-warning {{calling function 'special_not' requires negative capability '!executor_'}}
+}
+
+void foo5() REQUIRES(!executor_.get()) REQUIRES(executor_.get()) {
+    special(); // expected-warning {{cannot call function 'special' while thread 'executor_' is held}}
+}
+
+void foo6() REQUIRES(!executor_.get()) REQUIRES(executor_) {
+    special(); // expected-warning {{cannot call function 'special' while thread 'executor_' is held}}
 }
 
 unique_ptr<ThreadExecutor> executor_;
@@ -638,5 +668,72 @@ int some_value GUARDED_BY(executor_);
 int some_value_2 GUARDED_BY(some_lock);
 
 };
+
+}
+
+namespace negative_capabilities_on_private_fields {
+
+class MyLogic {
+  Mutex m;
+  ThreadExecutor* executor;
+  unique_ptr<ThreadExecutor> executorUPtr;
+
+  int some = 0;
+
+public:
+  void callA() REQUIRES(!m) {
+    some++;
+  }
+
+  void callB() REQUIRES(!executor) {
+    some++;
+  }
+
+  void callC() REQUIRES(!executorUPtr.get()) {
+    some++;
+  }
+
+  void actuallyWorks() {
+    callA(); // expected-warning {{calling function 'callA' requires negative capability '!m'}}
+    callB(); // expected-warning {{calling function 'callB' requires negative capability '!executor'}}
+    callC(); // expected-warning {{calling function 'callC' requires negative capability '!executorUPtr'}}
+  }
+};
+
+void just_invoke(std::function<void()> func) {
+  func();
+}
+
+void outside_fun(MyLogic& logic) {
+  logic.callA();
+  logic.callB();
+  logic.callC();
+
+  ThreadExecutor* executor;
+  executor->exec([&] { logic.callA(); });
+  executor->exec([&] { logic.callB(); });
+  executor->exec([&] { logic.callC(); });
+
+  just_invoke([&] { logic.callA(); });
+  just_invoke([&] { logic.callB(); });
+  just_invoke([&] { logic.callC(); });
+}
+
+}
+
+namespace no_tracking_capability {
+
+ThreadExecutor *executor;
+int counter GUARDED_BY(executor);
+
+void foo() {
+  auto callback NO_TRACKING_CAPABILITY = std::function<int()>([]() {
+   return counter;
+  });
+  callback(); // errornous, but no diagnostic
+
+  int a NO_TRACKING_CAPABILITY = 0;
+  executor->exec([&a]{ a++; }); // errornous, but no unsafe reference check
+}
 
 }

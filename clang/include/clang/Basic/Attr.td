@@ -3841,7 +3841,7 @@ def DetachedCapabilityHolder : Attr {
 
 def NoTrackingCapability : InheritableAttr {
   let Spellings = [Clang<"no_tracking_capability">];
-  let Subjects = SubjectList<[Function]>;
+  let Subjects = SubjectList<[Function, Var]>;
   let Documentation = [Undocumented];
   let SimpleHandler = 1;
 }
