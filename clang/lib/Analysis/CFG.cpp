@@ -5790,7 +5790,6 @@ static void print_elem(raw_ostream &OS, StmtPrinterHelper &Helper,
         return;
       }
     }
-    OS << "<" << S->getStmtClassName() << " " << S << "> ";
     S->printPretty(OS, &Helper, PrintingPolicy(Helper.getLangOpts()));
 
     if (auto VTC = E.getAs<CFGCXXRecordTypedCall>()) {
@@ -5993,7 +5992,7 @@ static void print_block(raw_ostream &OS, const CFG* cfg,
     if (print_edges)
       OS << " ";
 
-    OS << llvm::format("%3d", j) << ": <" << I->getKind() << "> ";
+    OS << llvm::format("%3d", j) << ": ";
 
     Helper.setStmtID(j);
 
