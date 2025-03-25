@@ -18,6 +18,8 @@
 #define RELEASE_SHARED(...)     __attribute__((release_shared_capability(__VA_ARGS__)))
 #define TRY_ACQUIRE(...)        __attribute__((try_acquire_capability(__VA_ARGS__)))
 #define TRY_ACQUIRE_SHARED(...) __attribute__((try_acquire_shared_capability(__VA_ARGS__)))
+#define TRY_ASSERT(...)         __attribute__((try_assert_capability(__VA_ARGS__)))
+#define TRY_ASSERT_SHARED(...)  __attribute__((try_assert_shared_capability(__VA_ARGS__)))
 
 #define GUARDED_BY(x) __attribute__((guarded_by(x)))
 #define PT_GUARDED_BY(x) __attribute__((pt_guarded_by(x)))
@@ -133,6 +135,23 @@ public:
 };
 
 }
+
+//=============================================================================
+
+template<typename K, typename V>
+struct pair {
+  K First;
+  V Second;
+  pair(const K &f, const V &s) : First(f), Second(s) {}
+
+  K getFirst() {
+    return First;
+  }
+
+  V getSecond() {
+    return Second;
+  }
+};
 
 //=============================================================================
 
@@ -734,6 +753,23 @@ void foo() {
 
   int a NO_TRACKING_CAPABILITY = 0;
   executor->exec([&a]{ a++; }); // errornous, but no unsafe reference check
+}
+
+}
+
+namespace try_assert {
+
+ThreadExecutor *executor;
+
+void bar() REQUIRES(executor);
+
+void foo() {
+  bool good_thread = executor->isInThread();
+  if (good_thread) {
+    bar();
+  } else {
+    bar(); // expected-warning {{calling function 'bar' requires holding thread 'executor' exclusively}}
+  }
 }
 
 }

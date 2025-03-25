@@ -1598,6 +1598,8 @@ void ThreadSafetyAnalyzer::getEdgeLockset(FactSet& Result,
 
   CapExprSet ExclusiveLocksToAdd;
   CapExprSet SharedLocksToAdd;
+  CapExprSet ExclusiveAssertedLocksToAdd;
+  CapExprSet SharedAssertedLocksToAdd;
 
   // If the condition is a call to a Trylock function, then grab the attributes
   for (const auto *Attr : FunDecl->attrs()) {
@@ -1606,6 +1608,14 @@ void ThreadSafetyAnalyzer::getEdgeLockset(FactSet& Result,
         auto *A = cast<TryAcquireCapabilityAttr>(Attr);
         getMutexIDs(A->isShared() ? SharedLocksToAdd : ExclusiveLocksToAdd, A,
                     Exp, FunDecl, PredBlock, CurrBlock, A->getSuccessValue(),
+                    Negate);
+        break;
+      }
+      case attr::TryAssertCapability: {
+        auto *A = cast<TryAssertCapabilityAttr>(Attr);
+        getMutexIDs(A->isShared() ? SharedAssertedLocksToAdd
+                                  : ExclusiveAssertedLocksToAdd,
+                    A, Exp, FunDecl, PredBlock, CurrBlock, A->getSuccessValue(),
                     Negate);
         break;
       }
@@ -1634,6 +1644,13 @@ void ThreadSafetyAnalyzer::getEdgeLockset(FactSet& Result,
   for (const auto &SharedLockToAdd : SharedLocksToAdd)
     addLock(Result, std::make_unique<LockableFactEntry>(SharedLockToAdd,
                                                         LK_Shared, Loc));
+  for (const auto &ExclusiveLockToAdd : ExclusiveAssertedLocksToAdd)
+    addLock(Result, std::make_unique<LockableFactEntry>(ExclusiveLockToAdd,
+                                                        LK_Exclusive, Loc,
+                                                        FactEntry::Asserted));
+  for (const auto &SharedLockToAdd : SharedAssertedLocksToAdd)
+    addLock(Result, std::make_unique<LockableFactEntry>(
+                        SharedLockToAdd, LK_Shared, Loc, FactEntry::Asserted));
 }
 
 namespace {
@@ -3157,6 +3174,9 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
         // Don't try to check trylock functions for now.
         return;
       } else if (isa<TryAcquireCapabilityAttr>(Attr)) {
+        // Don't try to check trylock functions for now.
+        return;
+      } else if (isa<TryAssertCapabilityAttr>(Attr)) {
         // Don't try to check trylock functions for now.
         return;
       }

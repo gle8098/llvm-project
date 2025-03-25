@@ -3648,6 +3648,21 @@ def TryAcquireCapability : InheritableAttr {
   let Documentation = [TryAcquireCapabilityDocs];
 }
 
+def TryAssertCapability : InheritableAttr {
+  let Spellings = [Clang<"try_assert_capability", 0>,
+                   Clang<"try_assert_shared_capability", 0>];
+  let Subjects = SubjectList<[Function],
+                             ErrorDiag>;
+  let LateParsed = LateAttrParseStandard;
+  let TemplateDependent = 1;
+  let ParseArgumentsAsUnevaluated = 1;
+  let InheritEvenIfAlreadyPresent = 1;
+  let Args = [ExprArgument<"SuccessValue">, VariadicExprArgument<"Args">];
+  let Accessors = [Accessor<"isShared",
+                    [Clang<"try_assert_shared_capability", 0>]>];
+  let Documentation = [Undocumented];
+}
+
 def ReleaseCapability : InheritableAttr {
   let Spellings = [Clang<"release_capability", 0>,
                    Clang<"release_shared_capability", 0>,

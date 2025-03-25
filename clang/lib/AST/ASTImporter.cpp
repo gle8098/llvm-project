@@ -9300,6 +9300,13 @@ Expected<Attr *> ASTImporter::Import(const Attr *FromAttr) {
                   From->args_size());
     break;
   }
+  case attr::TryAssertCapability: {
+    const auto *From = cast<TryAssertCapabilityAttr>(FromAttr);
+    AI.importAttr(From, AI.importArg(From->getSuccessValue()).value(),
+                  AI.importArrayArg(From->args(), From->args_size()).value(),
+                  From->args_size());
+    break;
+  }
   case attr::ReleaseCapability: {
     const auto *From = cast<ReleaseCapabilityAttr>(FromAttr);
     AI.importAttr(From,

@@ -5743,6 +5743,16 @@ static void handleTryAcquireCapabilityAttr(Sema &S, Decl *D,
       S.Context, AL, AL.getArgAsExpr(0), Args.data(), Args.size()));
 }
 
+static void handleTryAssertCapabilityAttr(Sema &S, Decl *D,
+                                          const ParsedAttr &AL) {
+  SmallVector<Expr *, 2> Args;
+  if (!checkTryLockFunAttrCommon(S, D, AL, Args))
+    return;
+
+  D->addAttr(::new (S.Context) TryAssertCapabilityAttr(
+      S.Context, AL, AL.getArgAsExpr(0), Args.data(), Args.size()));
+}
+
 static void handleReleaseCapabilityAttr(Sema &S, Decl *D,
                                         const ParsedAttr &AL) {
   // Check that all arguments are lockable objects.
@@ -7007,6 +7017,9 @@ ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D, const ParsedAttr &AL,
     break;
   case ParsedAttr::AT_TryAcquireCapability:
     handleTryAcquireCapabilityAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_TryAssertCapability:
+    handleTryAssertCapabilityAttr(S, D, AL);
     break;
 
   case ParsedAttr::AT_ExecuteWithCapability:
