@@ -9385,6 +9385,25 @@ Expected<Attr *> ASTImporter::Import(const Attr *FromAttr) {
                   From->args_size());
     break;
   }
+  case attr::ExecuteWithCapability: {
+    const auto *From = cast<ExecuteWithCapabilityAttr>(FromAttr);
+    AI.importAttr(From,
+                  AI.importArrayArg(From->args(), From->args_size()).value(),
+                  From->args_size());
+    break;
+  }
+  case attr::DetachedExecuteWithCapability: {
+    const auto *From = cast<DetachedExecuteWithCapabilityAttr>(FromAttr);
+    AI.importAttr(From, From->getDeclType(),
+                  AI.importArrayArg(From->args(), From->args_size()).value(),
+                  From->args_size());
+    break;
+  }
+  case attr::DetachedCapabilityHolder: {
+    const auto *From = cast<DetachedCapabilityHolderAttr>(FromAttr);
+    AI.importAttr(From, From->getDeclType());
+    break;
+  }
   default: {
     // The default branch works for attributes that have no arguments to import.
     // FIXME: Handle every attribute type that has arguments of type to import

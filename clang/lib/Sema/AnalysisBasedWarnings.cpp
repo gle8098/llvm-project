@@ -1856,14 +1856,21 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     ONS.push_back(
         PartialDiagnosticAt(DynamicRequiresAttr->CapUsageLoc.getBegin(),
                             S.PDiag(diag::note_dynamic_requires_attr)
+                                << DynamicRequiresAttr->CapabilityKind
                                 << DynamicRequiresAttr->CapabilityName));
   }
 
-  OptionalNotes makeLockedHereNote(SourceLocation LocLocked, StringRef Kind) {
-    return LocLocked.isValid()
-               ? getNotes(PartialDiagnosticAt(
-                     LocLocked, S.PDiag(diag::note_locked_here) << Kind))
-               : getNotes();
+  OptionalNotes makeLockedHereNote(LockedLockRef Lock) {
+    if (!Lock.Loc.isValid()) {
+      return getNotes();
+    } else if (Lock.DynamicRequiresAttr) {
+      return getNotes(PartialDiagnosticAt(
+          Lock.Loc, S.PDiag(diag::note_dynamic_requires_attr)
+                        << Lock.Kind << Lock.Name));
+    } else {
+      return getNotes(PartialDiagnosticAt(
+          Lock.Loc, S.PDiag(diag::note_locked_here) << Lock.Kind));
+    }
   }
 
   OptionalNotes makeUnlockedHereNote(SourceLocation LocUnlocked,
@@ -1914,31 +1921,27 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
                           makeUnlockedHereNote(LocPreviousUnlock, Kind));
   }
 
-  void handleIncorrectUnlockKind(StringRef Kind, Name LockName,
-                                 LockKind Expected, LockKind Received,
-                                 SourceLocation LocLocked,
+  void handleIncorrectUnlockKind(LockedLockRef Lock, LockKind Expected,
+                                 LockKind Received,
                                  SourceLocation LocUnlock) override {
     if (LocUnlock.isInvalid())
       LocUnlock = FunLocation;
     PartialDiagnosticAt Warning(
         LocUnlock, S.PDiag(diag::warn_unlock_kind_mismatch)
-                       << Kind << LockName << Received << Expected);
-    Warnings.emplace_back(std::move(Warning),
-                          makeLockedHereNote(LocLocked, Kind));
+                       << Lock.Kind << Lock.Name << Received << Expected);
+    Warnings.emplace_back(std::move(Warning), makeLockedHereNote(Lock));
   }
 
-  void handleDoubleLock(StringRef Kind, Name LockName, SourceLocation LocLocked,
+  void handleDoubleLock(LockedLockRef Lock,
                         SourceLocation LocDoubleLock) override {
     if (LocDoubleLock.isInvalid())
       LocDoubleLock = FunLocation;
     PartialDiagnosticAt Warning(LocDoubleLock, S.PDiag(diag::warn_double_lock)
-                                                   << Kind << LockName);
-    Warnings.emplace_back(std::move(Warning),
-                          makeLockedHereNote(LocLocked, Kind));
+                                                   << Lock.Kind << Lock.Name);
+    Warnings.emplace_back(std::move(Warning), makeLockedHereNote(Lock));
   }
 
-  void handleMutexHeldEndOfScope(StringRef Kind, Name LockName,
-                                 SourceLocation LocLocked,
+  void handleMutexHeldEndOfScope(LockedLockRef Lock,
                                  SourceLocation LocEndOfScope,
                                  LockErrorKind LEK) override {
     unsigned DiagID = 0;
@@ -1959,10 +1962,9 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     if (LocEndOfScope.isInvalid())
       LocEndOfScope = FunEndLocation;
 
-    PartialDiagnosticAt Warning(LocEndOfScope, S.PDiag(DiagID) << Kind
-                                                               << LockName);
-    Warnings.emplace_back(std::move(Warning),
-                          makeLockedHereNote(LocLocked, Kind));
+    PartialDiagnosticAt Warning(LocEndOfScope, S.PDiag(DiagID)
+                                                   << Lock.Kind << Lock.Name);
+    Warnings.emplace_back(std::move(Warning), makeLockedHereNote(Lock));
   }
 
   void handleExclusiveAndShared(StringRef Kind, Name LockName,
@@ -2106,8 +2108,17 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
     Warnings.emplace_back(std::move(Warning), getNotes());
   }
 
+  void handleDeclaredContradictionaryLocks(const FunctionDecl *D,
+                                           SourceLocation Loc, StringRef Kind,
+                                           Name LockName) override {
+    PartialDiagnosticAt Warning(Loc,
+                                S.PDiag(diag::warn_declared_contradictory_locks)
+                                    << D << Kind << LockName);
+    Warnings.emplace_back(std::move(Warning), getNotes());
+  }
+
   void handleExecWithCapabilityUnsatisfied(
-      SourceLocation ArgLoc, const CXXMethodDecl *ExecMethodDecl,
+      SourceLocation ArgLoc, const FunctionDecl *ExecMethodDecl,
       Name UnsatisfiedLockName,
       const llvm::SmallVector<std::string> &AcquiredLockNames,
       const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
@@ -2133,12 +2144,12 @@ class ThreadSafetyReporter : public clang::threadSafety::ThreadSafetyHandler {
 
   void handleFunctionalObjectLosesRequiresAttr(
       StringRef Kind, Name LockName, ValueLosesAnnotationKind VLAK,
-      SourceRange Loc, SourceRange TrackingOriginLoc,
+      Name SubjectName, SourceRange Loc, SourceRange TrackingOriginLoc,
       const DynamicRequiresAttrInfo *DynamicRequiresAttr) override {
     PartialDiagnosticAt Warning(
         Loc.getBegin(),
         S.PDiag(diag::warn_tracking_functional_object_going_out_of_scope)
-            << Kind << LockName << VLAK);
+            << Kind << LockName << VLAK << SubjectName);
 
     OptionalNotes Notes;
 

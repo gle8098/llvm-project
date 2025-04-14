@@ -99,9 +99,16 @@ enum LockErrorKind {
   LEK_NotLockedAtEndOfFunction
 };
 
-// todo: description
+/// This enum distinguishes between different situations where function object
+/// is passed out of the scope and thus we lose information about tracking
+/// capability.
+/// \enum VLAK_ByReturning -- a function object is returned from current
+/// function
+/// \enum VLAK_ByPassingAsArgument -- a function object is being passed as an
+/// argument to some function
+/// \enum VLAK_ByAssigningToField -- a function object is assigned to a field
+/// accessable from other scopes
 enum ValueLosesAnnotationKind {
-  VLAK_Unspecified,
   VLAK_ByReturning,
   VLAK_ByPassingAsArgument,
   VLAK_ByAssigningToField,
@@ -112,15 +119,44 @@ struct DynamicRequiresAttrInfo {
   /// Name of lock
   std::string CapabilityName;
 
+  /// Kind of lock
+  StringRef CapabilityKind;
+
   /// Begin location of the subject
   SourceLocation LambdaLoc;
 
   /// First found usage of CapExpr capability inside lambda
   SourceRange CapUsageLoc;
 
-  DynamicRequiresAttrInfo(std::string CapabilityName, SourceLocation LambdaLoc,
-                          SourceRange CapUsageLoc);
+  DynamicRequiresAttrInfo(std::string CapabilityName, StringRef CapabilityKind,
+                          SourceLocation LambdaLoc, SourceRange CapUsageLoc)
+      : CapabilityName(std::move(CapabilityName)),
+        CapabilityKind(CapabilityKind), LambdaLoc(LambdaLoc),
+        CapUsageLoc(CapUsageLoc) {}
 };
+
+/// Helper struct, which stores essentials about acquired capability
+struct LockedLock {
+  /// The capability's name parameter (role, mutex, etc).
+  StringRef Kind;
+
+  /// A StringRef name for the lock expression, to be printed in the error
+  /// message.
+  StringRef Name;
+
+  /// The SourceLocation of the Lock.
+  SourceLocation Loc;
+
+  /// (nullable) Additional info if the lock comes from added dynamically
+  /// REQUIRES attribute
+  const DynamicRequiresAttrInfo *DynamicRequiresAttr;
+
+  LockedLock(StringRef Kind, StringRef Name, SourceLocation Loc,
+             const DynamicRequiresAttrInfo *DynamicRequiresAttr = nullptr)
+      : Kind(Kind), Name(Name), Loc(Loc),
+        DynamicRequiresAttr(DynamicRequiresAttr) {}
+};
+using LockedLockRef = const LockedLock &;
 
 /// Handler class for thread safety warnings.
 class ThreadSafetyHandler {
@@ -151,43 +187,31 @@ public:
   /// Warn about an unlock function call that attempts to unlock a lock with
   /// the incorrect lock kind. For instance, a shared lock being unlocked
   /// exclusively, or vice versa.
-  /// \param LockName -- A StringRef name for the lock expression, to be printed
-  /// in the error message.
-  /// \param Kind -- the capability's name parameter (role, mutex, etc).
+  /// \param Lock -- The information of the acquires capability
   /// \param Expected -- the kind of lock expected.
   /// \param Received -- the kind of lock received.
-  /// \param LocLocked -- The SourceLocation of the Lock.
   /// \param LocUnlock -- The SourceLocation of the Unlock.
-  virtual void handleIncorrectUnlockKind(StringRef Kind, Name LockName,
-                                         LockKind Expected, LockKind Received,
-                                         SourceLocation LocLocked,
+  virtual void handleIncorrectUnlockKind(LockedLockRef Lock, LockKind Expected,
+                                         LockKind Received,
                                          SourceLocation LocUnlock) {}
 
   /// Warn about lock function calls for locks which are already held.
-  /// \param Kind -- the capability's name parameter (role, mutex, etc).
-  /// \param LockName -- A StringRef name for the lock expression, to be printed
-  /// in the error message.
-  /// \param LocLocked -- The location of the first lock expression.
+  /// \param Loc -- The information of the first lock expression.
   /// \param LocDoubleLock -- The location of the second lock expression.
-  virtual void handleDoubleLock(StringRef Kind, Name LockName,
-                                SourceLocation LocLocked,
+  virtual void handleDoubleLock(LockedLockRef Lock,
                                 SourceLocation LocDoubleLock) {}
 
   /// Warn about situations where a mutex is sometimes held and sometimes not.
   /// The three situations are:
   /// 1. a mutex is locked on an "if" branch but not the "else" branch,
-  /// 2, or a mutex is only held at the start of some loop iterations,
+  /// 2. or a mutex is only held at the start of some loop iterations,
   /// 3. or when a mutex is locked but not unlocked inside a function.
-  /// \param Kind -- the capability's name parameter (role, mutex, etc).
-  /// \param LockName -- A StringRef name for the lock expression, to be printed
-  /// in the error message.
-  /// \param LocLocked -- The location of the lock expression where the mutex is
-  ///               locked
+  /// \param Loc -- The information of the lock expression where the mutex is
+  ///               locked.
   /// \param LocEndOfScope -- The location of the end of the scope where the
   ///               mutex is no longer held
   /// \param LEK -- which of the three above cases we should warn for
-  virtual void handleMutexHeldEndOfScope(StringRef Kind, Name LockName,
-                                         SourceLocation LocLocked,
+  virtual void handleMutexHeldEndOfScope(LockedLockRef Lock,
                                          SourceLocation LocEndOfScope,
                                          LockErrorKind LEK) {}
 
@@ -268,15 +292,20 @@ public:
                                                Name LockName,
                                                SourceLocation Loc) {}
 
+  virtual void handleDeclaredContradictionaryLocks(const FunctionDecl *D,
+                                                   SourceLocation Loc,
+                                                   StringRef Kind,
+                                                   Name LockName) {}
+
   virtual void handleExecWithCapabilityUnsatisfied(
-      SourceLocation ArgLoc, const CXXMethodDecl *ExecMethodDecl,
+      SourceLocation ArgLoc, const FunctionDecl *ExecMethodDecl,
       Name UnsatisfiedLockName,
       const llvm::SmallVector<std::string> &AcquiredLockNames,
       const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
 
   virtual void handleFunctionalObjectLosesRequiresAttr(
       StringRef Kind, Name LockName, ValueLosesAnnotationKind VLAK,
-      SourceRange Loc, SourceRange TrackingOriginLoc,
+      Name SubjectName, SourceRange Loc, SourceRange TrackingOriginLoc,
       const DynamicRequiresAttrInfo *DynamicRequiresAttr) {}
 
   virtual void handleVerboseDynamicRequiresAttribute(const CXXMethodDecl *M,

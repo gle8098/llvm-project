@@ -7732,6 +7732,26 @@ struct ImportAttributes : public ASTImporterOptionSpecificTestBase {
     checkAttrImportCommon(FromAttr, ToAttr, ToD);
   }
 
+  template <class AT>
+  void importEmptyAttr(const char *Code, AT *&FromAttr, AT *&ToAttr,
+                       TestLanguage Lang = Lang_CXX11) {
+    static_assert(std::is_base_of<Attr, AT>::value, "AT should be an Attr");
+
+    Decl *FromTU = getTuDecl(Code, Lang, "input.cc");
+    EmptyDecl *FromD = FirstDeclMatcher<EmptyDecl>().match(FromTU, decl());
+    ASSERT_TRUE(FromD);
+
+    EmptyDecl *ToD = Import(FromD, Lang_CXX11);
+    ASSERT_TRUE(ToD);
+
+    FromAttr = FromD->template getAttr<AT>();
+    ToAttr = ToD->template getAttr<AT>();
+    ASSERT_TRUE(FromAttr);
+    EXPECT_TRUE(ToAttr);
+
+    checkAttrImportCommon(FromAttr, ToAttr, ToD);
+  }
+
   template <class T> void checkImported(const T *From, const T *To) {
     EXPECT_TRUE(To);
     EXPECT_NE(From, To);
@@ -7858,6 +7878,16 @@ TEST_P(ImportAttributes, ImportTryAcquireCapability) {
   checkImportVariadicArg(FromAttr->args(), ToAttr->args());
 }
 
+TEST_P(ImportAttributes, ImportTryAssertCapability) {
+  TryAssertCapabilityAttr *FromAttr, *ToAttr;
+  importAttr<FunctionDecl>(
+      "void test(int A1, int A2) __attribute__((try_assert_capability(1, A1, "
+      "A2)));",
+      FromAttr, ToAttr);
+  checkImported(FromAttr->getSuccessValue(), ToAttr->getSuccessValue());
+  checkImportVariadicArg(FromAttr->args(), ToAttr->args());
+}
+
 TEST_P(ImportAttributes, ImportReleaseCapability) {
   ReleaseCapabilityAttr *FromAttr, *ToAttr;
   importAttr<FunctionDecl>(
@@ -7879,6 +7909,30 @@ TEST_P(ImportAttributes, ImportNoThreadSafetyAnalysis) {
   importAttr<FunctionDecl>(
       "void test() __attribute__((no_thread_safety_analysis));", FromAttr,
       ToAttr);
+}
+
+TEST_P(ImportAttributes, ImportExecuteWithCapability) {
+  ExecuteWithCapabilityAttr *FromAttr, *ToAttr;
+  importAttr<FunctionDecl>("void test(int A1, int A2) "
+                           "__attribute__((execute_with_capability(A1, A2)));",
+                           FromAttr, ToAttr);
+  checkImportVariadicArg(FromAttr->args(), ToAttr->args());
+}
+
+TEST_P(ImportAttributes, ImportDetachedExecuteWithCapability) {
+  DetachedExecuteWithCapabilityAttr *FromAttr, *ToAttr;
+  importEmptyAttr(
+      "[[clang::det_execute_with_capability(\"DeclType\", \"*\")]];", FromAttr,
+      ToAttr);
+  EXPECT_EQ(FromAttr->getDeclType(), ToAttr->getDeclType());
+  checkImportVariadicArg(FromAttr->args(), ToAttr->args());
+}
+
+TEST_P(ImportAttributes, ImportDetachedCapabilityHolder) {
+  DetachedCapabilityHolderAttr *FromAttr, *ToAttr;
+  importEmptyAttr("[[clang::det_capability_holder(\"DeclType\")]];", FromAttr,
+                  ToAttr);
+  EXPECT_EQ(FromAttr->getDeclType(), ToAttr->getDeclType());
 }
 
 TEST_P(ImportAttributes, ImportGuardedBy) {

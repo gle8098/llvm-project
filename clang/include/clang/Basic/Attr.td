@@ -3692,7 +3692,7 @@ def RequiresCapability : InheritableAttr {
   let TemplateDependent = 1;
   let ParseArgumentsAsUnevaluated = 1;
   let InheritEvenIfAlreadyPresent = 1;
-  let Subjects = SubjectList<[Function]>;
+  let Subjects = SubjectList<[Function, Field, SharedVar]>;
   let Accessors = [Accessor<"isShared", [Clang<"requires_shared_capability", 0>,
                                          Clang<"shared_locks_required", 0>]>];
   let Documentation = [Undocumented];
@@ -3850,7 +3850,7 @@ def CapabilityHolder : Attr {
 def DetachedCapabilityHolder : Attr {
   let Spellings = [CXX11<"clang", "det_capability_holder">];
   let Subjects = SubjectList<[Empty], ErrorDiag, "empty declaration">;
-  let Args = [StringArgument<"Arg">];
+  let Args = [StringArgument<"DeclType">];
   let Documentation = [Undocumented];
 }
 

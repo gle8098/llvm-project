@@ -179,6 +179,8 @@ public:
 
     virtual void assertInThread() const noexcept ASSERT_CAPABILITY() = 0;
 
+    virtual bool isInThread() const noexcept TRY_ASSERT(true) = 0;
+
     inline bool exec(TaskBody taskBody, TaskCallerContext taskCallerContext = {}) EXECUTE_WITH_CAPABILITY()
     {
         return execImpl(taskBody, taskCallerContext);
@@ -269,7 +271,7 @@ SomeClass::SomeClass() {
 void SomeClass::init() {
   callbackExecutor->exec([this] { startImpl(); }); // expected-warning {{argument of 'exec' requires 'singleThreadExecutor' capability}} \
                                                    // expected-note {{acquired capabilities: 'callbackExecutor'}} \
-                                                   // expected-note {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
+                                                   // expected-note {{lambda implicitly requires thread 'singleThreadExecutor' for a statement here}}
 }
 
 void SomeClass::startImpl() {
@@ -303,9 +305,11 @@ void SomeClass::decrease() {
     };
 
     decreaseImpl(); // expected-warning {{calling function 'operator()' requires holding thread 'singleThreadExecutor' exclusively}} \
-                    // expected-note@-4 {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
+                    // expected-note@-4 {{lambda implicitly requires thread 'singleThreadExecutor' for a statement here}}
     singleThreadExecutor->exec(decreaseImpl);
 }
+
+extern bool *flag1, *flag2;
 
 void SomeClass::touchCounter() {
     auto touch = [this]() {
@@ -316,25 +320,36 @@ void SomeClass::touchCounter() {
     };
 
     singleThreadExecutor->exec(touch);
+
+    auto touchOnFlags = [this]() {
+        if (*flag1) {
+            increaseImpl();
+        }
+        if (*flag2) {
+            increaseImpl();
+        }
+    };
+    singleThreadExecutor->exec(touchOnFlags);
 }
 
 void SomeClass::touchCounter2() {
   auto lambda1 = [this]() {
-    this->callbackExecutor->assertInThread();
-    counter += 1; // expected-warning {{writing variable 'counter' requires holding thread 'singleThreadExecutor' exclusively}}
+    this->callbackExecutor->assertInThread(); // asserted, not added as dynamic req
+    counter += 1;
   };
-  (void) lambda1;
+  lambda1(); // expected-warning {{calling function 'operator()' requires holding thread 'singleThreadExecutor' exclusively}} \
+             // expected-note@-2 {{lambda implicitly requires thread 'singleThreadExecutor' for a statement here}}
 
   auto lambda2 = [this]() {
     counter += 1;
   };
   callbackExecutor->exec(lambda2); // expected-warning {{argument of 'exec' requires 'singleThreadExecutor' capability}} \
                                    // expected-note {{acquired capabilities: 'callbackExecutor'}} \
-                                   // expected-note@-2 {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
+                                   // expected-note@-2 {{lambda implicitly requires thread 'singleThreadExecutor' for a statement here}}
 
   callbackExecutor->exec(std::move(lambda2)); // expected-warning {{argument of 'exec' requires 'singleThreadExecutor' capability}} \
                                    // expected-note {{acquired capabilities: 'callbackExecutor'}} \
-                                   // expected-note@-6 {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
+                                   // expected-note@-6 {{lambda implicitly requires thread 'singleThreadExecutor' for a statement here}}
 }
 
 void SomeClass::callingGivenLambda(std::function<void()> lambda) {
@@ -343,8 +358,8 @@ void SomeClass::callingGivenLambda(std::function<void()> lambda) {
 
 void SomeClass::useCallingGivenLambda() {
   singleThreadExecutor->exec([this] {
-    callingGivenLambda([this] { counter++; }); // expected-warning {{functional object requiring thread 'singleThreadExecutor' loses its annotation by passing as argument to function call}} \
-                                               // expected-note {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
+    callingGivenLambda([this] { counter++; }); // expected-warning {{requirement on thread 'singleThreadExecutor' is discarded when function object is passed as argument to 'callingGivenLambda'}} \
+                                               // expected-note {{lambda implicitly requires thread 'singleThreadExecutor' for a statement here}}
   });
 }
 
@@ -353,8 +368,8 @@ int SomeClass::get() const {
 }
 
 std::function<void()> SomeClass::getIncreaseImpl() {
-  return [this]() { // expected-warning {{functional object requiring thread 'singleThreadExecutor' loses its annotation by returning from function}} \
-                    // expected-note@+2 {{lambda implicitly requires thread 'singleThreadExecutor' for this statement}}
+  return [this]() { // expected-warning {{requirement on thread 'singleThreadExecutor' is discarded when function object is being returned}} \
+                    // expected-note@+2 {{lambda implicitly requires thread 'singleThreadExecutor' for a statement here}}
     increaseImpl();
   };
 }
@@ -389,34 +404,63 @@ void SomeClass::onCounterChanged() {
 
 namespace overriden_method_requires_capability {
 
+
+
 class A {
 public:
   virtual ~A() = default;
 
   virtual void foo() = 0;
+
+  virtual void bar() REQUIRES(m) = 0;
+
+  virtual void hard(Mutex* given) = 0;
+
+protected:
+  Mutex m;
 };
 
 class B : public A {
 public:
   void foo() override REQUIRES(*executor) {} // expected-warning {{virtual function requires lock 'executor', but its base method does not}}
+  void bar() override REQUIRES(executor) {} // expected-warning {{virtual function requires lock 'executor', but its base method does not}}
+  void hard(Mutex* given) override REQUIRES(given) {}; // expected-warning {{virtual function requires lock 'given', but its base method does not}}
 
 private:
   ThreadExecutor* executor;
+};
+
+class B1 : public A {
+public:
+  void foo() override EXCLUDES(executor) {} // that's okay
+
+  void bar() override REQUIRES(m) REQUIRES(!executor) {} // that's okay
+
+private:
+  ThreadExecutor* executor;
+};
+
+class B2 : public A {
+public:
+  void foo() override {} // that's okay
+
+  void bar() override {} // that's okay
 };
 
 class C {
 public:
   virtual ~C() = default;
 
-  virtual void foo() REQUIRES(*executor1) {};
+  virtual void foo() REQUIRES(*executor1, m) {};
 
 protected:
   ThreadExecutor* executor1;
+  Mutex m;
 };
 
 class D : public C {
 public:
-  void foo() override REQUIRES(*executor2) {} // todo: warning {{virtual function requires lock 'executor2', but its base method does not}}
+  void foo() override REQUIRES(*executor2) {} // expected-warning {{virtual function requires lock 'executor2', but its base method does not}}
 
 private:
   ThreadExecutor* executor2;
@@ -477,7 +521,7 @@ public:
 
 //=============================================================================
 
-namespace model_failure {
+namespace capabilities_for_function_pointer {
 
 void (*getValuePtrGlobal)() = nullptr;
 
@@ -490,19 +534,19 @@ public:
 
   void foo() {
     std::function<void()> getValueLTmp = []() REQUIRES(executor) {};
-    getValuePtr = getValueLTmp; // expected-warning {{functional object requiring thread 'executor' loses its annotation by passing as argument to function call}} \
+    getValuePtr = getValueLTmp; // expected-warning {{requirement on thread 'executor' is discarded when function object is passed as argument to 'operator='}} \
                                 // expected-note@-1 {{capability 'executor' is traced from here}}
-    getValuePtr = std::function<void()>([]() REQUIRES(executor) {}); // expected-warning {{functional object requiring thread 'executor' loses its annotation by passing as argument to function call}}
+    getValuePtr = std::function<void()>([]() REQUIRES(executor) {}); // expected-warning {{requirement on thread 'executor' is discarded when function object is passed as argument to 'operator='}}
   }
 
   void bar() {
     void (*getValuePtrTmp)() = nullptr;
     getValuePtrTmp = []() REQUIRES(executor) {};
-    getValuePtr2 = []() REQUIRES(executor) {}; // expected-warning {{functional object requiring thread 'executor' loses its annotation by assigning to field}} \
+    getValuePtr2 = []() REQUIRES(executor) {}; // expected-warning {{requirement on thread 'executor' is discarded when function object is assigned to a field}} \
                                                // expected-note@-1 {{capability 'executor' is traced from here}}
-    getValuePtr2 = getValuePtrTmp; // expected-warning {{functional object requiring thread 'executor' loses its annotation by assigning to field}} \
+    getValuePtr2 = getValuePtrTmp; // expected-warning {{requirement on thread 'executor' is discarded when function object is assigned to a field}} \
                                    // expected-note@-2 {{capability 'executor' is traced from here}}
-    getValuePtrGlobal = getValuePtrTmp; // expected-warning {{functional object requiring thread 'executor' loses its annotation by assigning to field}} \
+    getValuePtrGlobal = getValuePtrTmp; // expected-warning {{requirement on thread 'executor' is discarded when function object is assigned to a field}} \
                                         // expected-note@-5 {{capability 'executor' is traced from here}}
   }
 
@@ -632,34 +676,22 @@ void special() REQUIRES(!executor_.get());
 void special_not() REQUIRES(executor_);
 
 void foo() {
-    executor_.get()->exec([this] { // expected-warning {{argument of 'exec' requires '!executor_' capability}} \
-                                   // expected-note {{acquired capabilities: 'executor_'}}
-        special(); // expected-note {{lambda implicitly requires thread '!executor_' for this statement}}
-    });
+  executor_.get()->exec([this] { // expected-warning {{argument of 'exec' requires '!executor_' capability}} \
+                                 // expected-note {{acquired capabilities: 'executor_'}}
+    special(); // expected-note {{lambda implicitly requires thread '!executor_' for a statement here}}
+  });
 
-    special(); // expected-warning {{calling function 'special' requires negative capability '!executor_'}}
-    executor_->assertInThread();
-    special(); // expected-warning {{cannot call function 'special' while thread 'executor_' is held}}
+  special(); // expected-warning {{calling function 'special' requires negative capability '!executor_'}}
+  executor_->assertInThread();
+  special(); // expected-warning {{cannot call function 'special' while thread 'executor_' is held}}
 }
 
 void foo2() REQUIRES(!executor_.get()) {
-    special();
+  special();
 }
 
-void foo3() REQUIRES(!executor_.get()) REQUIRES(executor_.get()) {
-    special_not(); // expected-warning {{calling function 'special_not' requires negative capability '!executor_'}}
-}
-
-void foo4() REQUIRES(!executor_.get()) REQUIRES(executor_) {
-    special_not(); // expected-warning {{calling function 'special_not' requires negative capability '!executor_'}}
-}
-
-void foo5() REQUIRES(!executor_.get()) REQUIRES(executor_.get()) {
-    special(); // expected-warning {{cannot call function 'special' while thread 'executor_' is held}}
-}
-
-void foo6() REQUIRES(!executor_.get()) REQUIRES(executor_) {
-    special(); // expected-warning {{cannot call function 'special' while thread 'executor_' is held}}
+void foo3() REQUIRES(executor_.get()) {
+  special(); // expected-warning {{cannot call function 'special' while thread 'executor_' is held}}
 }
 
 unique_ptr<ThreadExecutor> executor_;
@@ -667,6 +699,39 @@ unique_ptr<ThreadExecutor> executor_;
 };
 
 }
+
+//=============================================================================
+
+namespace declared_contradictory_locks {
+
+class Testing {
+
+  void foo1() REQUIRES(!executor_.get()) REQUIRES(executor_.get()) {
+    // expected-warning@-1 {{function 'foo1' requires and excludes thread 'executor_' at once}}
+  }
+  
+  void foo2() REQUIRES(!executor_.get()) REQUIRES(executor_) {
+    // expected-warning@-1 {{function 'foo2' requires and excludes thread 'executor_' at once}}
+  }
+  
+  void foo3() EXCLUDES(executor_.get()) REQUIRES(executor_.get()) {
+    // expected-warning@-1 {{function 'foo3' requires and excludes thread 'executor_' at once}}
+  }
+  
+  void foo4() REQUIRES(executor_) REQUIRES(!executor_.get())  {
+    // expected-warning@-1 {{function 'foo4' requires and excludes thread 'executor_' at once}}
+  }
+  
+  void foo5() REQUIRES(executor_) EXCLUDES(executor_.get())  {
+    // expected-warning@-1 {{function 'foo5' requires and excludes thread 'executor_' at once}}
+  }
+
+  unique_ptr<ThreadExecutor> executor_;
+
+};
+
+}
+
 
 //=============================================================================
 
@@ -773,3 +838,208 @@ void foo() {
 }
 
 }
+
+namespace do_not_ignore_public_requires {
+
+class A {
+private:
+  ThreadExecutor* executor;
+
+public:
+  void foo() REQUIRES(executor) {}
+};
+
+void foo() {
+  A* a;
+  a->foo(); // expected-warning {{calling function 'foo' requires holding thread 'a->executor' exclusively}}
+}
+
+}
+
+namespace callback_with_requires {
+
+class A {
+
+Mutex m;
+Mutex fakeM;
+std::function<void()> toBeCalledWithM REQUIRES(this->m);
+
+void assign() {
+  auto lambda = []() REQUIRES(this->m) {};
+  toBeCalledWithM = lambda;
+
+  auto badLambda = []() REQUIRES(this->fakeM) {};
+  toBeCalledWithM = badLambda; // expected-warning {{requirement on mutex 'fakeM' is discarded when function object is passed as argument to 'operator='}} \
+                               // expected-note@-1 {{capability 'fakeM' is traced from here}}
+
+  auto lambdaNoCap = []() {};
+  toBeCalledWithM = lambdaNoCap;
+}
+
+std::function<void()> requires_origin() {
+  toBeCalledWithM(); // expected-warning {{calling function 'operator()' requires holding mutex 'm' exclusively}}
+
+  m.Lock();
+  toBeCalledWithM();
+  m.Unlock();
+
+  auto l = std::move(toBeCalledWithM); // we may move out the object, or access it by value anyhow
+
+  // but we cannot invoke it or return (moving out of the scope => RequiresCapabilityAttr would be missed)
+  l(); // expected-warning {{calling function 'operator()' requires holding mutex 'm' exclusively}} \
+       // expected-note@-3 {{capability 'm' is traced from here}}
+  return l; // expected-warning {{requirement on mutex 'm' is discarded when function object is being returned}} \
+            // expected-note@-5 {{capability 'm' is traced from here}}
+}
+
+};
+
+}
+
+namespace mix_of_dynrequires_and_explicit_lock {
+
+ThreadExecutor* executor;
+Mutex m;
+
+int data_exec GUARDED_BY(executor);
+int data_m GUARDED_BY(m);
+
+void foo() {
+  executor->exec([] {
+    MutexLock lock(&m);
+    data_m = 5;
+    data_exec = 6;
+  });
+
+
+  executor->exec([] {
+    data_exec = 6;
+
+    MutexLock lock(&m);
+    data_m = 5;
+    data_exec = 6;
+  });
+}
+
+}
+
+namespace dynamic_attr_with_scopes {
+
+extern bool *flag1, *flag2;
+
+ThreadExecutor *executor;
+
+void bar() REQUIRES(executor) {}
+void not_bar() REQUIRES(!executor) {}
+void not_bar_soft() EXCLUDES(executor) {}
+
+void foo() {  
+  executor->exec([]() { // expected-warning {{argument of 'exec' requires '!executor' capability}} \
+                        // expected-note {{acquired capabilities: 'executor'}}
+    not_bar_soft(); // mentions, but does not requires !executor
+    if (*flag1) {
+      // cannot add dynamic requires for executor -- already mentioned
+      bar(); // expected-warning {{calling function 'bar' requires holding thread 'executor' exclusively}}
+    }
+    if (*flag2) {
+      // cannot add dynamic requires for executor -- already mentioned
+      bar(); // expected-warning {{calling function 'bar' requires holding thread 'executor' exclusively}}
+    }
+    while (*flag1 && *flag2) {
+      // can add dynamic requires for executor -- negative mentioned and negative required here
+      // imho somewhat strange behavior, but still correct
+      not_bar(); // expected-note {{lambda implicitly requires thread '!executor' for a statement here}}
+    }
+  });
+}
+
+void foo3() {  
+  executor->exec([]() {
+    if (*flag1) {
+      bar(); // dynamically adds executor
+    }
+    if (*flag2) {
+      bar();
+    }
+    while (*flag1 && *flag2) {
+      not_bar(); // expected-warning {{cannot call function 'not_bar' while thread 'executor' is held}}
+    }
+  });
+}
+
+void foo_negative() {
+  auto lambda1 = []() {
+    not_bar(); // requires dyn attr, ok
+    not_bar_soft();
+  };
+
+  auto lambda2 = []() {
+    not_bar_soft();
+    not_bar(); // requires negative dyn attr, ok because it is safe with EXCLUDES(same_cap)
+  };
+}
+
+Mutex m;
+
+int m_data GUARDED_BY(m);
+void bar_m() REQUIRES(m) {}
+
+void foo2() {
+  auto lambda = []() /*REQUIRES(m)*/ {
+    {
+      m.Lock();
+      bar_m();
+      m.Unlock();
+    }
+  
+    m_data++; // expected-warning {{writing variable 'm_data' requires holding mutex 'm' exclusively}}
+  };
+}
+
+void foo2_before() {
+  auto lambda = []() /*REQUIRES(m)*/ {
+    int i = m_data; // Ok, take m as dynamic requires attr
+
+    {
+      m.Lock(); // expected-warning {{acquiring mutex 'm' that is already held}} \
+                // expected-note@-3 {{lambda implicitly requires mutex 'm' for a statement here}}
+      bar_m();
+      m.Unlock();
+    }
+  
+    m_data++; // expected-warning {{writing variable 'm_data' requires holding mutex 'm' exclusively}}
+  }; // expected-warning {{expecting mutex 'm' to be held at the end of function}} \
+     // expected-note@-10 {{lambda implicitly requires mutex 'm' for a statement here}}
+}
+
+void foo2_no_scope() {
+  auto lambda = []() /*REQUIRES(m)*/ {
+    int i = m_data; // Ok, take m as dynamic requires attr
+
+    m.Lock(); // expected-warning {{acquiring mutex 'm' that is already held}} \
+                // expected-note@-2 {{lambda implicitly requires mutex 'm' for a statement here}}
+    bar_m();
+    m.Unlock();
+  
+    m_data++; // expected-warning {{writing variable 'm_data' requires holding mutex 'm' exclusively}}
+  }; // expected-warning {{expecting mutex 'm' to be held at the end of function}} \
+     // expected-note@-8 {{lambda implicitly requires mutex 'm' for a statement here}}
+}
+
+void foo2_no_scope_excludes() {
+  auto lambda = []() EXCLUDES(m) {
+    // cannot add m as dynamic requires, m is mentioned in declaration (EXCLUDES)
+    int i = m_data; // expected-warning {{reading variable 'm_data' requires holding mutex 'm'}}
+
+    m.Lock();
+    bar_m();
+    m.Unlock();
+  
+    m_data++; // expected-warning {{writing variable 'm_data' requires holding mutex 'm' exclusively}}
+  };
+}
+
+}
+
+
+

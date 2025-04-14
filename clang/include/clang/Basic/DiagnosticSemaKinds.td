@@ -4015,7 +4015,9 @@ def warn_acquired_before_after_cycle : Warning<
 def warn_overriden_fun_requires_lock : Warning<
   "virtual function requires lock '%0', but its base method does not">,
   InGroup<ThreadSafetyAnalysis>, DefaultIgnore;
-
+def warn_declared_contradictory_locks : Warning<
+  "function %0 requires and excludes %1 '%2' at once">,
+  InGroup<ThreadSafetyAnalysis>, DefaultIgnore;
 
 // Thread safety warnings negative capabilities
 def warn_acquire_requires_negative_cap : Warning<
@@ -4081,14 +4083,13 @@ def note_first_thread_capability_acquired :
 
 // Thread safety warnings related to values tracking
 def warn_tracking_functional_object_going_out_of_scope :
-  Warning<"functional object requiring %0 '%1' loses its annotation"
-  "%select{| by returning from function| by passing as argument to function "
-  "call| by assigning to field}2">,
+  Warning<"requirement on %0 '%1' is discarded when function object is "
+  "%select{being returned|passed as argument to '%3'|assigned to a field}2">,
   InGroup<ThreadSafetySTE>, DefaultIgnore;
 def note_capability_traced_from_here :
   Note<"capability '%0' is traced from here">;
 def note_dynamic_requires_attr :
-  Note<"lambda implicitly requires thread '%0' for this statement">;
+  Note<"lambda implicitly requires %0 '%1' for a statement here">;
 
 // Verbose thread safety warnings
 def warn_thread_safety_verbose : Warning<"thread safety verbose warning">,
